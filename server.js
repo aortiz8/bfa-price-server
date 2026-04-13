@@ -103,7 +103,7 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     + '<Item>'
     + '<Title>' + title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,80) + '</Title>'
     + '<Description><![CDATA[' + description + ']]></Description>'
-    + '<PrimaryCategory><CategoryID>267</CategoryID></PrimaryCategory>'
+    + '<PrimaryCategory><CategoryID>171228</CategoryID></PrimaryCategory>'
     + '<StartPrice>' + price.toFixed(2) + '</StartPrice>'
     + '<CategoryMappingAllowed>true</CategoryMappingAllowed>'
     + '<ConditionID>' + conditionId + '</ConditionID>'
