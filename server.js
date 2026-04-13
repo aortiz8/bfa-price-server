@@ -241,7 +241,7 @@ var server = http.createServer(function(req, res) {
   var url = new URL(req.url, 'http://localhost');
 
   // OAuth callback from eBay
-  if (url.pathname === '/auth/callback') {
+  if (url.pathname === '/callback') {
     var code = url.searchParams.get('code');
     if (!code) {
       res.writeHead(400); res.end('Missing code');
