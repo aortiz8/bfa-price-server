@@ -5,8 +5,6 @@ var PORT = process.env.PORT || 3000;
 var CLIENT_ID = 'CodexBro-Booksfor-PRD-66c135696-2728b4d0';
 var CLIENT_SECRET = 'PRD-6c135696e4a6-8789-475a-8eaf-1662';
 var DEV_ID = '3e7db631-fffe-4cd8-92b6-6bca13515742';
-
-// Single source of truth for user token
 var USER_TOKEN = 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 
 var COND_MAP = {
@@ -21,10 +19,7 @@ var cachedToken = null;
 var tokenExpiry = 0;
 
 function getToken(cb) {
-  if (cachedToken && Date.now() < tokenExpiry) {
-    cb(null, cachedToken);
-    return;
-  }
+  if (cachedToken && Date.now() < tokenExpiry) { cb(null, cachedToken); return; }
   var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
   var body = 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope';
   var opts = {
@@ -47,9 +42,7 @@ function getToken(cb) {
           cachedToken = json.access_token;
           tokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
           cb(null, cachedToken);
-        } else {
-          cb('Token error: ' + data);
-        }
+        } else { cb('Token error: ' + data); }
       } catch(e) { cb('Token parse error: ' + e.message); }
     });
   });
@@ -59,7 +52,7 @@ function getToken(cb) {
   req.end();
 }
 
-function searchActive(keywords, conditionId, token, cb) {
+function searchEbay(keywords, conditionId, token, cb) {
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267'
@@ -86,8 +79,7 @@ function searchActive(keywords, conditionId, token, cb) {
         if (items.length === 0) { cb(null, 'No items'); return; }
         var prices = [];
         for (var i = 0; i < items.length; i++) {
-          var item = items[i];
-          var price = item.price && parseFloat(item.price.value);
+          var price = items[i].price && parseFloat(items[i].price.value);
           if (!price || isNaN(price) || price <= 0) continue;
           prices.push(price);
         }
@@ -96,51 +88,6 @@ function searchActive(keywords, conditionId, token, cb) {
         for (var j = 0; j < prices.length; j++) sum += prices[j];
         var avg = Math.round(sum / prices.length * 100) / 100;
         cb({ count: prices.length, average: Math.round((avg + 3.99) * 100) / 100 });
-      } catch(e) { cb(null, 'Parse error: ' + e.message); }
-    });
-  });
-  req.on('error', function(e) { cb(null, e.message); });
-  req.setTimeout(15000, function() { req.destroy(); cb(null, 'Timeout'); });
-  req.end();
-}
-
-function searchSold(keywords, conditionId, token, cb) {
-  var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
-  var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
-    + '&category_ids=267'
-    + '&filter=buyingOptions:{FIXED_PRICE}' + condFilter
-    + '&limit=20'
-    + '&sort=price';
-  var opts = {
-    hostname: 'api.ebay.com',
-    path: query,
-    method: 'GET',
-    headers: {
-      'Authorization': 'Bearer ' + token,
-      'Content-Type': 'application/json',
-      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
-    }
-  };
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      try {
-        var json = JSON.parse(data);
-        var items = json.itemSummaries || [];
-        if (items.length === 0) { cb(null, 'No items'); return; }
-        var prices = [];
-        for (var i = 0; i < items.length; i++) {
-          var item = items[i];
-          var price = item.price && parseFloat(item.price.value);
-          if (!price || isNaN(price) || price <= 0) continue;
-          prices.push(price);
-        }
-        if (prices.length === 0) { cb(null, 'No prices'); return; }
-        var sum = 0;
-        for (var j = 0; j < prices.length; j++) sum += prices[j];
-        var avg2 = Math.round(sum / prices.length * 100) / 100;
-        cb({ count: prices.length, average: Math.round((avg2 + 3.99) * 100) / 100 });
       } catch(e) { cb(null, 'Parse error: ' + e.message); }
     });
   });
@@ -165,9 +112,7 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     + '<DispatchTimeMax>2</DispatchTimeMax>'
     + '<ListingDuration>GTC</ListingDuration>'
     + '<ListingType>FixedPriceItem</ListingType>'
-    + '<PaymentMethods>PayPal</PaymentMethods>'
-    + '<PayPalEmailAddress>booksforages@email.com</PayPalEmailAddress>'
-    + '<PictureDetails><GalleryType>Gallery</GalleryType></PictureDetails>'
+    + '<Quantity>1</Quantity>'
     + '<ReturnPolicy>'
     + '<ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>'
     + '<RefundOption>MoneyBack</RefundOption>'
@@ -178,7 +123,7 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     + '<ShippingType>Flat</ShippingType>'
     + '<ShippingServiceOptions>'
     + '<ShippingServicePriority>1</ShippingServicePriority>'
-    + '<ShippingService>USPSMediaMail</ShippingService>'
+    + '<ShippingService>USPSMedia</ShippingService>'
     + '<ShippingServiceCost>3.99</ShippingServiceCost>'
     + '</ShippingServiceOptions>'
     + '</ShippingDetails>'
@@ -206,12 +151,13 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
+      console.log('eBay response:', data.substring(0, 500));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) {
         cb({ listingId: idMatch[1] });
       } else {
-        cb({ error: errMatch ? errMatch[1] : 'Unknown eBay error', raw: data.substring(0, 300) });
+        cb({ error: errMatch ? errMatch[1] : 'Unknown eBay error', raw: data.substring(0, 500) });
       }
     });
   });
@@ -231,8 +177,7 @@ var server = http.createServer(function(req, res) {
 
   var url = new URL(req.url, 'http://localhost');
 
-  // ── /list  (POST only) ──────────────────────────────────────────────────────
-  // IMPORTANT: this must be checked BEFORE the GET-only guard below.
+  // /list — POST only, must be before the GET-only guard
   if (url.pathname === '/list') {
     if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
     var body = '';
@@ -252,13 +197,13 @@ var server = http.createServer(function(req, res) {
         });
       } catch(e) {
         res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+        res.end(JSON.stringify({ error: 'Invalid JSON: ' + e.message }));
       }
     });
     return;
   }
 
-  // ── All remaining routes are GET only ──────────────────────────────────────
+  // All other routes are GET only
   if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
 
   if (url.pathname === '/health') {
@@ -294,31 +239,25 @@ var server = http.createServer(function(req, res) {
     }
 
     if (url.pathname === '/sold') {
-      searchSold(kw, conditionId, token, function(result, searchErr) {
+      searchEbay(kw, conditionId, token, function(result, searchErr) {
         res.writeHead(200);
-        res.end(JSON.stringify(searchErr
-          ? { error: searchErr, average: null, count: 0 }
-          : result));
+        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
       });
       return;
     }
 
     if (url.pathname === '/price') {
-      searchActive(kw, conditionId, token, function(result, searchErr) {
+      searchEbay(kw, conditionId, token, function(result, searchErr) {
         if (searchErr && isbn && title) {
           var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
-          searchActive(kw2, conditionId, token, function(r2, e2) {
+          searchEbay(kw2, conditionId, token, function(r2, e2) {
             res.writeHead(200);
-            res.end(JSON.stringify(e2
-              ? { error: e2, average: null, count: 0 }
-              : r2));
+            res.end(JSON.stringify(e2 ? { error: e2, average: null, count: 0 } : r2));
           });
           return;
         }
         res.writeHead(200);
-        res.end(JSON.stringify(searchErr
-          ? { error: searchErr, average: null, count: 0 }
-          : result));
+        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
       });
       return;
     }
