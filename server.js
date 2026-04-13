@@ -96,34 +96,45 @@ function searchEbay(keywords, conditionId, token, cb) {
   req.end();
 }
 
+function esc(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, cb) {
+  var specifics = '<ItemSpecifics>'
+    + '<NameValueList><Name>Book Title</Name><Value>' + esc(title).substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Author</Name><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Language</Name><Value>' + esc(language || 'English') + '</Value></NameValueList>'
+    + '</ItemSpecifics>';
+
+  var pictures = pictureUrl
+    ? '<PictureDetails><PictureURL>' + pictureUrl + '</PictureURL></PictureDetails>'
+    : '';
+
   var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
     + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
     + '<Item>'
-    + '<Title>' + title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,80) + '</Title>'
+    + '<Title>' + esc(title).substring(0, 80) + '</Title>'
     + '<Description><![CDATA[' + description + ']]></Description>'
     + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
     + '<StartPrice>' + price.toFixed(2) + '</StartPrice>'
     + '<CategoryMappingAllowed>true</CategoryMappingAllowed>'
     + '<ConditionID>' + conditionId + '</ConditionID>'
-    + '<ItemSpecifics>'
-    + '<NameValueList><Name>Book Title</Name><Value>' + title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,65) + '</Value></NameValueList>'
-    + '<NameValueList><Name>Language</Name><Value>' + (language || 'English') + '</Value></NameValueList>'
-    + '</ItemSpecifics>'
-    + (pictureUrl ? '<PictureDetails><PictureURL>' + pictureUrl + '</PictureURL></PictureDetails>' : '')
+    + specifics
+    + pictures
     + '<Country>US</Country>'
     + '<Currency>USD</Currency>'
     + '<DispatchTimeMax>2</DispatchTimeMax>'
     + '<ListingDuration>GTC</ListingDuration>'
     + '<ListingType>FixedPriceItem</ListingType>'
     + '<Quantity>1</Quantity>'
+    + '<PostalCode>92105</PostalCode>'
     + '<SellerProfiles>'
     + '<SellerShippingProfile><ShippingProfileName>Shipping 2020-01-02</ShippingProfileName></SellerShippingProfile>'
     + '<SellerReturnProfile><ReturnProfileName>Returns Accepted,Buyer,30 Days,Money Back#0</ReturnProfileName></SellerReturnProfile>'
     + '<SellerPaymentProfile><PaymentProfileName>eBay Payments</PaymentProfileName></SellerPaymentProfile>'
     + '</SellerProfiles>'
-    + '<PostalCode>92105</PostalCode>'
     + '<Site>US</Site>'
     + '</Item>'
     + '</AddItemRequest>';
@@ -148,7 +159,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay response:', data.substring(0, 500));
+      console.log('eBay response:', data.substring(0, 800));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) {
@@ -164,261 +175,8 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
   req.end();
 }
 
-var server = http.createServer(function(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Content-Type', 'application/json');
-
-  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
-
-  var url = new URL(req.url, 'http://localhost');
-
-  // /list — POST only, must be before the GET-only guard
-  if (url.pathname === '/list') {
-    if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
-    var body = '';
-    req.on('data', function(c) { body += c; });
-    req.on('end', function() {
-      try {
-        var data = JSON.parse(body);
-        var title = data.title || '';
-        var description = data.description || '';
-        var price = parseFloat(data.price) || 9.99;
-        var isbn = data.isbn || '';
-        var conditionId = parseInt(data.conditionId) || 3000;
-        if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        createListing(title, description, price, isbn, conditionId, data.pictureUrl || '', data.language || 'English', data.author || '', function(result) {
-          res.writeHead(200);
-          res.end(JSON.stringify(result));
-        });
-      } catch(e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Invalid JSON: ' + e.message }));
-      }
-    });
-    return;
-  }
-
-  // /upload — POST only
-  if (url.pathname === '/upload') {
-    if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
-    var body = '';
-    req.on('data', function(c) { body += c; });
-    req.on('end', function() {
-      try {
-        var data = JSON.parse(body);
-        var b64 = data.image || '';
-        // Strip data URL prefix if present
-        b64 = b64.replace(/^data:image\/[a-z]+;base64,/, '');
-        var imgBuffer = Buffer.from(b64, 'base64');
-        uploadPicture(imgBuffer, function(result) {
-          res.writeHead(200);
-          res.end(JSON.stringify(result));
-        });
-      } catch(e) {
-        res.writeHead(400);
-        res.end(JSON.stringify({ error: 'Invalid JSON: ' + e.message }));
-      }
-    });
-    return;
-  }
-
-  // All other routes are GET only
-  if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
-
-  if (url.pathname === '/health') {
-    res.writeHead(200);
-    res.end('{"status":"ok"}');
-    return;
-  }
-
-  if (url.pathname === '/category') {
-    getExistingCategory(function(result) {
-      res.writeHead(200);
-      res.end(JSON.stringify(result));
-    });
-    return;
-  }
-
-  var title = url.searchParams.get('title') || '';
-  var author = url.searchParams.get('author') || '';
-  var isbn = (url.searchParams.get('isbn') || '').replace(/[^0-9X]/gi, '');
-  var cond = url.searchParams.get('condition') || '3000';
-    if (url.pathname === '/policies') {
-      getSellerProfiles(function(result) {
-        res.writeHead(200);
-        res.end(JSON.stringify(result));
-      });
-      return;
-    }
-
-  var signed = url.searchParams.get('signed') === '1';
-  var conditionId = COND_MAP[cond] || 'GOOD';
-
-  if (!title && !isbn) {
-    res.writeHead(400);
-    res.end('{"error":"missing title or isbn"}');
-    return;
-  }
-
-  var kw = isbn
-    ? isbn
-    : (title + (author ? ' ' + author : '') + (signed ? ' signed' : ''));
-
-  console.log('Search:', kw, 'Condition:', conditionId, 'Path:', url.pathname);
-
-  getToken(function(err, token) {
-    if (err) {
-      res.writeHead(200);
-      res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
-      return;
-    }
-
-    if (url.pathname === '/sold') {
-      searchEbay(kw, conditionId, token, function(result, searchErr) {
-        res.writeHead(200);
-        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
-      });
-      return;
-    }
-
-    if (url.pathname === '/price') {
-      searchEbay(kw, conditionId, token, function(result, searchErr) {
-        if (searchErr && isbn && title) {
-          var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
-          searchEbay(kw2, conditionId, token, function(r2, e2) {
-            res.writeHead(200);
-            res.end(JSON.stringify(e2 ? { error: e2, average: null, count: 0 } : r2));
-          });
-          return;
-        }
-        res.writeHead(200);
-        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
-      });
-      return;
-    }
-
-    res.writeHead(404);
-    res.end('{}');
-  });
-});
-
-server.listen(PORT, function() {
-  console.log('BFA price server running on port ' + PORT);
-});
-
-// Fetch seller business policy IDs
-
-function getSellerProfiles(cb) {
-  var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
-    + '<GetUserPreferencesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-    + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
-    + '<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>'
-    + '</GetUserPreferencesRequest>';
-
-  var opts = {
-    hostname: 'api.ebay.com',
-    path: '/ws/api.dll',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'text/xml',
-      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-      'X-EBAY-API-CALL-NAME': 'GetUserPreferences',
-      'X-EBAY-API-SITEID': '0',
-      'X-EBAY-API-APP-NAME': CLIENT_ID,
-      'X-EBAY-API-DEV-NAME': DEV_ID,
-      'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
-      'Content-Length': Buffer.byteLength(xmlBody)
-    }
-  };
-
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      console.log('Preferences response:', data.substring(0, 3000));
-      var shipping = [];
-      var returns = [];
-      var payments = [];
-
-      var shipMatches = data.match(/<ShippingPolicyProfile>[\s\S]*?<\/ShippingPolicyProfile>/g) || [];
-      shipMatches.forEach(function(m) {
-        var id = (m.match(/<ShippingProfileID>(\d+)<\/ShippingProfileID>/) || [])[1];
-        var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
-        if (id) shipping.push({ id: id, name: name });
-      });
-
-      var retMatches = data.match(/<ReturnPolicyProfile>[\s\S]*?<\/ReturnPolicyProfile>/g) || [];
-      retMatches.forEach(function(m) {
-        var id = (m.match(/<ReturnProfileID>(\d+)<\/ReturnProfileID>/) || [])[1];
-        var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
-        if (id) returns.push({ id: id, name: name });
-      });
-
-      var payMatches = data.match(/<PaymentProfile>[\s\S]*?<\/PaymentProfile>/g) || [];
-      payMatches.forEach(function(m) {
-        var id = (m.match(/<PaymentProfileID>(\d+)<\/PaymentProfileID>/) || [])[1];
-        var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
-        if (id) payments.push({ id: id, name: name });
-      });
-
-      cb({ shipping: shipping, returns: returns, payments: payments, raw: data.substring(0, 4000) });
-    });
-  });
-  req.on('error', function(e) { cb({ error: e.message }); });
-  req.setTimeout(15000, function() { req.destroy(); cb({ error: 'Timeout' }); });
-  req.write(xmlBody);
-  req.end();
-}
-
-function getExistingCategory(cb) {
-  var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
-    + '<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-    + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
-    + '<StartTimeFrom>2024-01-01T00:00:00.000Z</StartTimeFrom>'
-    + '<StartTimeTo>2026-01-01T00:00:00.000Z</StartTimeTo>'
-    + '<Pagination><EntriesPerPage>1</EntriesPerPage><PageNumber>1</PageNumber></Pagination>'
-    + '<DetailLevel>ReturnAll</DetailLevel>'
-    + '</GetSellerListRequest>';
-
-  var opts = {
-    hostname: 'api.ebay.com',
-    path: '/ws/api.dll',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'text/xml',
-      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-      'X-EBAY-API-CALL-NAME': 'GetSellerList',
-      'X-EBAY-API-SITEID': '0',
-      'X-EBAY-API-APP-NAME': CLIENT_ID,
-      'X-EBAY-API-DEV-NAME': DEV_ID,
-      'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
-      'Content-Length': Buffer.byteLength(xmlBody)
-    }
-  };
-
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      var catMatch = data.match(/<PrimaryCategory>[\s\S]*?<CategoryID>(\d+)<\/CategoryID>/);
-      var catNameMatch = data.match(/<PrimaryCategory>[\s\S]*?<CategoryName>(.*?)<\/CategoryName>/);
-      cb({
-        categoryId: catMatch ? catMatch[1] : null,
-        categoryName: catNameMatch ? catNameMatch[1] : null,
-        raw: data.substring(0, 1000)
-      });
-    });
-  });
-  req.on('error', function(e) { cb({ error: e.message }); });
-  req.setTimeout(15000, function() { req.destroy(); cb({ error: 'Timeout' }); });
-  req.write(xmlBody);
-  req.end();
-}
-
 function uploadPicture(imgBuffer, cb) {
-  var boundary = '---BFA_BOUNDARY_' + Date.now();
+  var boundary = 'BFA_BOUNDARY_' + Date.now();
   var xmlPart = '<?xml version="1.0" encoding="utf-8"?>'
     + '<UploadSiteHostedPicturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
@@ -476,3 +234,174 @@ function uploadPicture(imgBuffer, cb) {
   req.write(body);
   req.end();
 }
+
+function getSellerProfiles(cb) {
+  var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<GetUserPreferencesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
+    + '<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>'
+    + '</GetUserPreferencesRequest>';
+  var opts = {
+    hostname: 'api.ebay.com',
+    path: '/ws/api.dll',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+      'X-EBAY-API-CALL-NAME': 'GetUserPreferences',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-APP-NAME': CLIENT_ID,
+      'X-EBAY-API-DEV-NAME': DEV_ID,
+      'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+      'Content-Length': Buffer.byteLength(xmlBody)
+    }
+  };
+  var req = https.request(opts, function(res) {
+    var data = '';
+    res.on('data', function(c) { data += c; });
+    res.on('end', function() {
+      cb({ raw: data.substring(0, 2000) });
+    });
+  });
+  req.on('error', function(e) { cb({ error: e.message }); });
+  req.setTimeout(15000, function() { req.destroy(); cb({ error: 'Timeout' }); });
+  req.write(xmlBody);
+  req.end();
+}
+
+var server = http.createServer(function(req, res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Content-Type', 'application/json');
+
+  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
+
+  var url = new URL(req.url, 'http://localhost');
+
+  // /list — POST only
+  if (url.pathname === '/list') {
+    if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
+    var body = '';
+    req.on('data', function(c) { body += c; });
+    req.on('end', function() {
+      try {
+        var data = JSON.parse(body);
+        var title = data.title || '';
+        var description = data.description || '';
+        var price = parseFloat(data.price) || 9.99;
+        var isbn = data.isbn || '';
+        var conditionId = parseInt(data.conditionId) || 3000;
+        var pictureUrl = data.pictureUrl || '';
+        var language = data.language || 'English';
+        var author = data.author || '';
+        if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
+        createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, function(result) {
+          res.writeHead(200);
+          res.end(JSON.stringify(result));
+        });
+      } catch(e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid JSON: ' + e.message }));
+      }
+    });
+    return;
+  }
+
+  // /upload — POST only
+  if (url.pathname === '/upload') {
+    if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
+    var body = '';
+    req.on('data', function(c) { body += c; });
+    req.on('end', function() {
+      try {
+        var data = JSON.parse(body);
+        var b64 = (data.image || '').replace(/^data:image\/[a-z]+;base64,/, '');
+        var imgBuffer = Buffer.from(b64, 'base64');
+        uploadPicture(imgBuffer, function(result) {
+          res.writeHead(200);
+          res.end(JSON.stringify(result));
+        });
+      } catch(e) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ error: 'Invalid JSON: ' + e.message }));
+      }
+    });
+    return;
+  }
+
+  // All other routes GET only
+  if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
+
+  if (url.pathname === '/health') {
+    res.writeHead(200);
+    res.end('{"status":"ok"}');
+    return;
+  }
+
+  if (url.pathname === '/policies') {
+    getSellerProfiles(function(result) {
+      res.writeHead(200);
+      res.end(JSON.stringify(result));
+    });
+    return;
+  }
+
+  var title = url.searchParams.get('title') || '';
+  var author = url.searchParams.get('author') || '';
+  var isbn = (url.searchParams.get('isbn') || '').replace(/[^0-9X]/gi, '');
+  var cond = url.searchParams.get('condition') || '3000';
+  var signed = url.searchParams.get('signed') === '1';
+  var conditionId = COND_MAP[cond] || 'GOOD';
+
+  if (!title && !isbn) {
+    res.writeHead(400);
+    res.end('{"error":"missing title or isbn"}');
+    return;
+  }
+
+  var kw = isbn
+    ? isbn
+    : (title + (author ? ' ' + author : '') + (signed ? ' signed' : ''));
+
+  console.log('Search:', kw, 'Condition:', conditionId, 'Path:', url.pathname);
+
+  getToken(function(err, token) {
+    if (err) {
+      res.writeHead(200);
+      res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
+      return;
+    }
+
+    if (url.pathname === '/sold') {
+      searchEbay(kw, conditionId, token, function(result, searchErr) {
+        res.writeHead(200);
+        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
+      });
+      return;
+    }
+
+    if (url.pathname === '/price') {
+      searchEbay(kw, conditionId, token, function(result, searchErr) {
+        if (searchErr && isbn && title) {
+          var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
+          searchEbay(kw2, conditionId, token, function(r2, e2) {
+            res.writeHead(200);
+            res.end(JSON.stringify(e2 ? { error: e2, average: null, count: 0 } : r2));
+          });
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
+      });
+      return;
+    }
+
+    res.writeHead(404);
+    res.end('{}');
+  });
+});
+
+server.listen(PORT, function() {
+  console.log('BFA price server running on port ' + PORT);
+});
