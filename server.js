@@ -40,7 +40,7 @@ var req = https.request(opts, function(res) {
 var data = '';
 res.on('data', function(c) { data += c; });
 res.on('end', function() {
-try {
+try {}
 var json = JSON.parse(data);
 var resp = json['findCompletedItemsResponse'];
 if (!resp || !resp[0]) { cb(null, 'No response'); return; }
