@@ -1,0 +1,12 @@
+{
+  "name": "bfa-price-server",
+  "version": "1.0.0",
+  "description": "Books for Ages eBay price server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=14"
+  }
+}
