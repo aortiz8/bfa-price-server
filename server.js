@@ -281,11 +281,13 @@ server.listen(PORT, function() {
 });
 
 // Fetch seller business policy IDs
+
 function getSellerProfiles(cb) {
   var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
-    + '<GetSellerProfilesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<GetUserPreferencesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
-    + '</GetSellerProfilesRequest>';
+    + '<ShowSellerProfilePreferences>true</ShowSellerProfilePreferences>'
+    + '</GetUserPreferencesRequest>';
 
   var opts = {
     hostname: 'api.ebay.com',
@@ -294,7 +296,7 @@ function getSellerProfiles(cb) {
     headers: {
       'Content-Type': 'text/xml',
       'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-      'X-EBAY-API-CALL-NAME': 'GetSellerProfiles',
+      'X-EBAY-API-CALL-NAME': 'GetUserPreferences',
       'X-EBAY-API-SITEID': '0',
       'X-EBAY-API-APP-NAME': CLIENT_ID,
       'X-EBAY-API-DEV-NAME': DEV_ID,
@@ -307,32 +309,33 @@ function getSellerProfiles(cb) {
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('Profiles response:', data.substring(0, 2000));
-      // Parse shipping profiles
+      console.log('Preferences response:', data.substring(0, 3000));
       var shipping = [];
+      var returns = [];
+      var payments = [];
+
       var shipMatches = data.match(/<ShippingPolicyProfile>[\s\S]*?<\/ShippingPolicyProfile>/g) || [];
       shipMatches.forEach(function(m) {
         var id = (m.match(/<ShippingProfileID>(\d+)<\/ShippingProfileID>/) || [])[1];
         var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
         if (id) shipping.push({ id: id, name: name });
       });
-      // Parse return profiles
-      var returns = [];
+
       var retMatches = data.match(/<ReturnPolicyProfile>[\s\S]*?<\/ReturnPolicyProfile>/g) || [];
       retMatches.forEach(function(m) {
         var id = (m.match(/<ReturnProfileID>(\d+)<\/ReturnProfileID>/) || [])[1];
         var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
         if (id) returns.push({ id: id, name: name });
       });
-      // Parse payment profiles
-      var payments = [];
+
       var payMatches = data.match(/<PaymentProfile>[\s\S]*?<\/PaymentProfile>/g) || [];
       payMatches.forEach(function(m) {
         var id = (m.match(/<PaymentProfileID>(\d+)<\/PaymentProfileID>/) || [])[1];
         var name = (m.match(/<ProfileName>(.*?)<\/ProfileName>/) || [])[1];
         if (id) payments.push({ id: id, name: name });
       });
-      cb({ shipping: shipping, returns: returns, payments: payments, raw: data.substring(0, 3000) });
+
+      cb({ shipping: shipping, returns: returns, payments: payments, raw: data.substring(0, 4000) });
     });
   });
   req.on('error', function(e) { cb({ error: e.message }); });
