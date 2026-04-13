@@ -106,17 +106,21 @@ function searchActive(keywords, conditionId, token, cb) {
   req.end();
 }
 
-function searchSold(keywords, cb) {
-  // Fetch eBay sold listings with free shipping filter
-  var path = '/sch/i.html?_nkw=' + encodeURIComponent(keywords)
-    + '&LH_Sold=1&LH_Complete=1&LH_FS=1&_sop=12&_ipg=25';
+function searchSold(keywords, conditionId, token, cb) {
+  var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
+  var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
+    + '&category_ids=267'
+    + '&filter=buyingOptions:{FIXED_PRICE},soldItemsOnly:true,freeShippingOnly:true' + condFilter
+    + '&limit=20'
+    + '&sort=price';
   var opts = {
-    hostname: 'www.ebay.com',
-    path: path,
+    hostname: 'api.ebay.com',
+    path: query,
     method: 'GET',
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; BooksForAges/1.0)',
-      'Accept': 'text/html'
+      'Authorization': 'Bearer ' + token,
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
     }
   };
   var req = https.request(opts, function(res) {
@@ -124,28 +128,17 @@ function searchSold(keywords, cb) {
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
       try {
-        // Parse prices from eBay search results HTML
+        var json = JSON.parse(data);
+        var items = json.itemSummaries || [];
+        if (items.length === 0) { cb(null, 'No sold items'); return; }
         var prices = [];
-        var regex = /s-item__price[^>]*>[\s]*<span[^>]*>\$([0-9]+\.[0-9]+)/g;
-        var match;
-        while ((match = regex.exec(data)) !== null) {
-          var p = parseFloat(match[1]);
-          if (p && !isNaN(p) && p > 0 && p < 500) prices.push(p);
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          var price = item.price && parseFloat(item.price.value);
+          if (!price || isNaN(price) || price <= 0) continue;
+          prices.push(price);
         }
-        // Also try another pattern
-        if (prices.length === 0) {
-          var regex2 = /\$([0-9]+\.[0-9]{2})(?:[^0-9])/g;
-          var seen = {};
-          while ((match = regex2.exec(data)) !== null) {
-            var p2 = parseFloat(match[1]);
-            if (p2 && !isNaN(p2) && p2 > 0.5 && p2 < 200 && !seen[p2]) {
-              seen[p2] = true;
-              prices.push(p2);
-              if (prices.length >= 20) break;
-            }
-          }
-        }
-        if (prices.length === 0) { cb(null, 'No sold prices found'); return; }
+        if (prices.length === 0) { cb(null, 'No sold prices'); return; }
         var sum = 0;
         for (var j = 0; j < prices.length; j++) sum += prices[j];
         cb({ count: prices.length, average: Math.round(sum / prices.length * 100) / 100 });
@@ -190,23 +183,24 @@ var server = http.createServer(function(req, res) {
 
   console.log('Search:', kw, 'Condition:', conditionId, 'Path:', url.pathname);
 
-  if (url.pathname === '/sold') {
-    searchSold(kw, function(result, err) {
+  getToken(function(err, token) {
+    if (err) {
       res.writeHead(200);
-      res.end(JSON.stringify(err
-        ? { error: err, average: null, count: 0 }
-        : result));
-    });
-    return;
-  }
+      res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
+      return;
+    }
 
-  if (url.pathname === '/price') {
-    getToken(function(err, token) {
-      if (err) {
+    if (url.pathname === '/sold') {
+      searchSold(kw, conditionId, token, function(result, searchErr) {
         res.writeHead(200);
-        res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
-        return;
-      }
+        res.end(JSON.stringify(searchErr
+          ? { error: searchErr, average: null, count: 0 }
+          : result));
+      });
+      return;
+    }
+
+    if (url.pathname === '/price') {
       searchActive(kw, conditionId, token, function(result, searchErr) {
         if (searchErr && isbn && title) {
           var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
@@ -223,12 +217,12 @@ var server = http.createServer(function(req, res) {
           ? { error: searchErr, average: null, count: 0 }
           : result));
       });
-    });
-    return;
-  }
+      return;
+    }
 
-  res.writeHead(404);
-  res.end('{}');
+    res.writeHead(404);
+    res.end('{}');
+  });
 });
 
 server.listen(PORT, function() {
