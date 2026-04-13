@@ -103,7 +103,7 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     + '<Item>'
     + '<Title>' + title.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').substring(0,80) + '</Title>'
     + '<Description><![CDATA[' + description + ']]></Description>'
-    + '<PrimaryCategory><CategoryID>171228</CategoryID></PrimaryCategory>'
+    + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
     + '<StartPrice>' + price.toFixed(2) + '</StartPrice>'
     + '<CategoryMappingAllowed>true</CategoryMappingAllowed>'
     + '<ConditionID>' + conditionId + '</ConditionID>'
@@ -201,6 +201,14 @@ var server = http.createServer(function(req, res) {
   if (url.pathname === '/health') {
     res.writeHead(200);
     res.end('{"status":"ok"}');
+    return;
+  }
+
+  if (url.pathname === '/category') {
+    getExistingCategory(function(result) {
+      res.writeHead(200);
+      res.end(JSON.stringify(result));
+    });
     return;
   }
 
@@ -327,6 +335,51 @@ function getSellerProfiles(cb) {
       });
 
       cb({ shipping: shipping, returns: returns, payments: payments, raw: data.substring(0, 4000) });
+    });
+  });
+  req.on('error', function(e) { cb({ error: e.message }); });
+  req.setTimeout(15000, function() { req.destroy(); cb({ error: 'Timeout' }); });
+  req.write(xmlBody);
+  req.end();
+}
+
+function getExistingCategory(cb) {
+  var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<GetSellerListRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
+    + '<StartTimeFrom>2024-01-01T00:00:00.000Z</StartTimeFrom>'
+    + '<StartTimeTo>2026-01-01T00:00:00.000Z</StartTimeTo>'
+    + '<Pagination><EntriesPerPage>1</EntriesPerPage><PageNumber>1</PageNumber></Pagination>'
+    + '<DetailLevel>ReturnAll</DetailLevel>'
+    + '</GetSellerListRequest>';
+
+  var opts = {
+    hostname: 'api.ebay.com',
+    path: '/ws/api.dll',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+      'X-EBAY-API-CALL-NAME': 'GetSellerList',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-APP-NAME': CLIENT_ID,
+      'X-EBAY-API-DEV-NAME': DEV_ID,
+      'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+      'Content-Length': Buffer.byteLength(xmlBody)
+    }
+  };
+
+  var req = https.request(opts, function(res) {
+    var data = '';
+    res.on('data', function(c) { data += c; });
+    res.on('end', function() {
+      var catMatch = data.match(/<PrimaryCategory>[\s\S]*?<CategoryID>(\d+)<\/CategoryID>/);
+      var catNameMatch = data.match(/<PrimaryCategory>[\s\S]*?<CategoryName>(.*?)<\/CategoryName>/);
+      cb({
+        categoryId: catMatch ? catMatch[1] : null,
+        categoryName: catNameMatch ? catNameMatch[1] : null,
+        raw: data.substring(0, 1000)
+      });
     });
   });
   req.on('error', function(e) { cb({ error: e.message }); });
