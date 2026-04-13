@@ -80,25 +80,18 @@ function searchActive(keywords, conditionId, token, cb) {
         var json = JSON.parse(data);
         var items = json.itemSummaries || [];
         if (items.length === 0) { cb(null, 'No items'); return; }
-        var totals = [];
+        var prices = [];
         for (var i = 0; i < items.length; i++) {
           var item = items[i];
           var price = item.price && parseFloat(item.price.value);
           if (!price || isNaN(price) || price <= 0) continue;
-          var shipping = 0;
-          if (item.shippingOptions && item.shippingOptions.length > 0) {
-            var s = item.shippingOptions[0];
-            if (s.shippingCost && s.shippingCost.value) {
-              shipping = parseFloat(s.shippingCost.value) || 0;
-            }
-          }
-          totals.push(price + shipping);
+          prices.push(price);
         }
-        if (totals.length === 0) { cb(null, 'No prices'); return; }
+        if (prices.length === 0) { cb(null, 'No prices'); return; }
         var sum = 0;
-        for (var j = 0; j < totals.length; j++) sum += totals[j];
-        var avg = Math.round(sum / totals.length * 100) / 100;
-        cb({ count: totals.length, average: Math.round((avg + 3.99) * 100) / 100 });
+        for (var j = 0; j < prices.length; j++) sum += prices[j];
+        var avg = Math.round(sum / prices.length * 100) / 100;
+        cb({ count: prices.length, average: Math.round((avg + 3.99) * 100) / 100 });
       } catch(e) { cb(null, 'Parse error: ' + e.message); }
     });
   });
@@ -113,7 +106,7 @@ function searchSold(keywords, conditionId, token, cb) {
     + '&category_ids=267'
     + '&filter=buyingOptions:{FIXED_PRICE}' + condFilter
     + '&limit=20'
-    + '&sort=endingSoonest';
+    + '&sort=price';
   var opts = {
     hostname: 'api.ebay.com',
     path: query,
