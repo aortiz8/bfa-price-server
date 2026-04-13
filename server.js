@@ -55,7 +55,7 @@ function getToken(cb) {
   req.end();
 }
 
-function search(keywords, conditionId, token, cb) {
+function searchActive(keywords, conditionId, token, cb) {
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267'
@@ -80,12 +80,72 @@ function search(keywords, conditionId, token, cb) {
         var json = JSON.parse(data);
         var items = json.itemSummaries || [];
         if (items.length === 0) { cb(null, 'No items'); return; }
-        var prices = [];
+        var totals = [];
         for (var i = 0; i < items.length; i++) {
-          var p = items[i].price && parseFloat(items[i].price.value);
-          if (p && !isNaN(p) && p > 0) prices.push(p);
+          var item = items[i];
+          var price = item.price && parseFloat(item.price.value);
+          if (!price || isNaN(price) || price <= 0) continue;
+          var shipping = 0;
+          if (item.shippingOptions && item.shippingOptions.length > 0) {
+            var s = item.shippingOptions[0];
+            if (s.shippingCost && s.shippingCost.value) {
+              shipping = parseFloat(s.shippingCost.value) || 0;
+            }
+          }
+          totals.push(price + shipping);
         }
-        if (prices.length === 0) { cb(null, 'No prices'); return; }
+        if (totals.length === 0) { cb(null, 'No prices'); return; }
+        var sum = 0;
+        for (var j = 0; j < totals.length; j++) sum += totals[j];
+        cb({ count: totals.length, average: Math.round(sum / totals.length * 100) / 100 });
+      } catch(e) { cb(null, 'Parse error: ' + e.message); }
+    });
+  });
+  req.on('error', function(e) { cb(null, e.message); });
+  req.setTimeout(15000, function() { req.destroy(); cb(null, 'Timeout'); });
+  req.end();
+}
+
+function searchSold(keywords, cb) {
+  // Fetch eBay sold listings with free shipping filter
+  var path = '/sch/i.html?_nkw=' + encodeURIComponent(keywords)
+    + '&LH_Sold=1&LH_Complete=1&LH_FS=1&_sop=12&_ipg=25';
+  var opts = {
+    hostname: 'www.ebay.com',
+    path: path,
+    method: 'GET',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; BooksForAges/1.0)',
+      'Accept': 'text/html'
+    }
+  };
+  var req = https.request(opts, function(res) {
+    var data = '';
+    res.on('data', function(c) { data += c; });
+    res.on('end', function() {
+      try {
+        // Parse prices from eBay search results HTML
+        var prices = [];
+        var regex = /s-item__price[^>]*>[\s]*<span[^>]*>\$([0-9]+\.[0-9]+)/g;
+        var match;
+        while ((match = regex.exec(data)) !== null) {
+          var p = parseFloat(match[1]);
+          if (p && !isNaN(p) && p > 0 && p < 500) prices.push(p);
+        }
+        // Also try another pattern
+        if (prices.length === 0) {
+          var regex2 = /\$([0-9]+\.[0-9]{2})(?:[^0-9])/g;
+          var seen = {};
+          while ((match = regex2.exec(data)) !== null) {
+            var p2 = parseFloat(match[1]);
+            if (p2 && !isNaN(p2) && p2 > 0.5 && p2 < 200 && !seen[p2]) {
+              seen[p2] = true;
+              prices.push(p2);
+              if (prices.length >= 20) break;
+            }
+          }
+        }
+        if (prices.length === 0) { cb(null, 'No sold prices found'); return; }
         var sum = 0;
         for (var j = 0; j < prices.length; j++) sum += prices[j];
         cb({ count: prices.length, average: Math.round(sum / prices.length * 100) / 100 });
@@ -104,54 +164,71 @@ var server = http.createServer(function(req, res) {
   if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
   if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
   var url = new URL(req.url, 'http://localhost');
+
   if (url.pathname === '/health') {
     res.writeHead(200);
     res.end('{"status":"ok"}');
     return;
   }
-  if (url.pathname !== '/price') {
-    res.writeHead(404);
-    res.end('{}');
-    return;
-  }
+
   var title = url.searchParams.get('title') || '';
   var author = url.searchParams.get('author') || '';
   var isbn = (url.searchParams.get('isbn') || '').replace(/[^0-9X]/gi, '');
   var cond = url.searchParams.get('condition') || '3000';
   var signed = url.searchParams.get('signed') === '1';
   var conditionId = COND_MAP[cond] || 'GOOD';
+
   if (!title && !isbn) {
     res.writeHead(400);
     res.end('{"error":"missing title or isbn"}');
     return;
   }
+
   var kw = isbn
     ? isbn
     : (title + (author ? ' ' + author : '') + (signed ? ' signed' : ''));
-  console.log('Search:', kw, 'Condition:', conditionId);
-  getToken(function(err, token) {
-    if (err) {
+
+  console.log('Search:', kw, 'Condition:', conditionId, 'Path:', url.pathname);
+
+  if (url.pathname === '/sold') {
+    searchSold(kw, function(result, err) {
       res.writeHead(200);
-      res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
-      return;
-    }
-    search(kw, conditionId, token, function(result, searchErr) {
-      if (searchErr && isbn && title) {
-        var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
-        search(kw2, conditionId, token, function(r2, e2) {
-          res.writeHead(200);
-          res.end(JSON.stringify(e2
-            ? { error: e2, average: null, count: 0 }
-            : r2));
-        });
-        return;
-      }
-      res.writeHead(200);
-      res.end(JSON.stringify(searchErr
-        ? { error: searchErr, average: null, count: 0 }
+      res.end(JSON.stringify(err
+        ? { error: err, average: null, count: 0 }
         : result));
     });
-  });
+    return;
+  }
+
+  if (url.pathname === '/price') {
+    getToken(function(err, token) {
+      if (err) {
+        res.writeHead(200);
+        res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 }));
+        return;
+      }
+      searchActive(kw, conditionId, token, function(result, searchErr) {
+        if (searchErr && isbn && title) {
+          var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
+          searchActive(kw2, conditionId, token, function(r2, e2) {
+            res.writeHead(200);
+            res.end(JSON.stringify(e2
+              ? { error: e2, average: null, count: 0 }
+              : r2));
+          });
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify(searchErr
+          ? { error: searchErr, average: null, count: 0 }
+          : result));
+      });
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('{}');
 });
 
 server.listen(PORT, function() {
