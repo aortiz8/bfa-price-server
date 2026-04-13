@@ -97,7 +97,8 @@ function searchActive(keywords, conditionId, token, cb) {
         if (totals.length === 0) { cb(null, 'No prices'); return; }
         var sum = 0;
         for (var j = 0; j < totals.length; j++) sum += totals[j];
-        cb({ count: totals.length, average: Math.round(sum / totals.length * 100) / 100 });
+        var avg = Math.round(sum / totals.length * 100) / 100;
+        cb({ count: totals.length, average: Math.round((avg + 3.99) * 100) / 100 });
       } catch(e) { cb(null, 'Parse error: ' + e.message); }
     });
   });
@@ -107,14 +108,12 @@ function searchActive(keywords, conditionId, token, cb) {
 }
 
 function searchSold(keywords, conditionId, token, cb) {
-  // Use Browse API with FREE_SHIPPING filter and sold/completed items
-  // We search active free-shipping listings as a proxy for sold free-shipping prices
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267'
-    + '&filter=buyingOptions:{FIXED_PRICE},maxDeliveryCost:0' + condFilter
+    + '&filter=buyingOptions:{FIXED_PRICE}' + condFilter
     + '&limit=20'
-    + '&sort=price';
+    + '&sort=endingSoonest';
   var opts = {
     hostname: 'api.ebay.com',
     path: query,
@@ -143,7 +142,8 @@ function searchSold(keywords, conditionId, token, cb) {
         if (prices.length === 0) { cb(null, 'No prices'); return; }
         var sum = 0;
         for (var j = 0; j < prices.length; j++) sum += prices[j];
-        cb({ count: prices.length, average: Math.round(sum / prices.length * 100) / 100 });
+        var avg2 = Math.round(sum / prices.length * 100) / 100;
+        cb({ count: prices.length, average: Math.round((avg2 + 3.99) * 100) / 100 });
       } catch(e) { cb(null, 'Parse error: ' + e.message); }
     });
   });
