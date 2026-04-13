@@ -107,10 +107,12 @@ function searchActive(keywords, conditionId, token, cb) {
 }
 
 function searchSold(keywords, conditionId, token, cb) {
+  // Use Browse API with FREE_SHIPPING filter and sold/completed items
+  // We search active free-shipping listings as a proxy for sold free-shipping prices
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267'
-    + '&filter=buyingOptions:{FIXED_PRICE},soldItemsOnly:true,freeShippingOnly:true' + condFilter
+    + '&filter=buyingOptions:{FIXED_PRICE},maxDeliveryCost:0' + condFilter
     + '&limit=20'
     + '&sort=price';
   var opts = {
@@ -130,7 +132,7 @@ function searchSold(keywords, conditionId, token, cb) {
       try {
         var json = JSON.parse(data);
         var items = json.itemSummaries || [];
-        if (items.length === 0) { cb(null, 'No sold items'); return; }
+        if (items.length === 0) { cb(null, 'No items'); return; }
         var prices = [];
         for (var i = 0; i < items.length; i++) {
           var item = items[i];
@@ -138,7 +140,7 @@ function searchSold(keywords, conditionId, token, cb) {
           if (!price || isNaN(price) || price <= 0) continue;
           prices.push(price);
         }
-        if (prices.length === 0) { cb(null, 'No sold prices'); return; }
+        if (prices.length === 0) { cb(null, 'No prices'); return; }
         var sum = 0;
         for (var j = 0; j < prices.length; j++) sum += prices[j];
         cb({ count: prices.length, average: Math.round(sum / prices.length * 100) / 100 });
