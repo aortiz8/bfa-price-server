@@ -113,6 +113,7 @@ function createListing(title, description, price, isbn, conditionId, cb) {
     + '<ListingDuration>GTC</ListingDuration>'
     + '<ListingType>FixedPriceItem</ListingType>'
     + '<Quantity>1</Quantity>'
+    + '<PostalCode>92101</PostalCode>'
     + '<ReturnPolicy>'
     + '<ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>'
     + '<RefundOption>MoneyBack</RefundOption>'
