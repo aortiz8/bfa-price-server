@@ -96,7 +96,7 @@ function searchEbay(keywords, conditionId, token, cb) {
   req.end();
 }
 
-function createListing(title, description, price, isbn, conditionId, pictureUrl, language, cb) {
+function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, cb) {
   var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
     + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
@@ -188,7 +188,7 @@ var server = http.createServer(function(req, res) {
         var isbn = data.isbn || '';
         var conditionId = parseInt(data.conditionId) || 3000;
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        createListing(title, description, price, isbn, conditionId, data.pictureUrl || '', data.language || 'English', function(result) {
+        createListing(title, description, price, isbn, conditionId, data.pictureUrl || '', data.language || 'English', data.author || '', function(result) {
           res.writeHead(200);
           res.end(JSON.stringify(result));
         });
