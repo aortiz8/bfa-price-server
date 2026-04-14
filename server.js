@@ -164,6 +164,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     + '<SellerPaymentProfile><PaymentProfileName>eBay Payments</PaymentProfileName></SellerPaymentProfile>'
     + '</SellerProfiles>'
     + '<Site>US</Site>'
+    + (isbn && (isbn.replace(/[^0-9]/g,'').substring(0,3) === '978' || isbn.replace(/[^0-9]/g,'').substring(0,3) === '979') ? '<ProductListingDetails><ISBN>' + isbn.replace(/[^0-9X]/gi,'') + '</ISBN><IncludeeBayProductDetails>false</IncludeeBayProductDetails></ProductListingDetails>' : '')
     + '</Item>'
     + '</AddItemRequest>';
 
