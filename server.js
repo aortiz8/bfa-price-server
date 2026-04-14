@@ -271,14 +271,23 @@ var server = http.createServer(function(req, res) {
       res2.on('data', function(c) { data2 += c; });
       res2.on('end', function() {
         var results = [];
-        var parts = data2.split('<Value>');
-        for (var i = 1; i < parts.length; i++) {
-          var id = (parts[i].match(/<ID>(\d+)<\/ID>/) || [])[1];
-          var name = (parts[i].match(/<DisplayName>(.*?)<\/DisplayName>/) || [])[1];
+        var idx = 0;
+        while (true) {
+          var start = data2.indexOf('<ConditionValue>', idx);
+          if (start === -1) break;
+          var end = data2.indexOf('</ConditionValue>', start);
+          var chunk = data2.substring(start, end);
+          var idStart = chunk.indexOf('<ID>') + 4;
+          var idEnd = chunk.indexOf('</ID>');
+          var nameStart = chunk.indexOf('<DisplayName>') + 13;
+          var nameEnd = chunk.indexOf('</DisplayName>');
+          var id = chunk.substring(idStart, idEnd);
+          var name = chunk.substring(nameStart, nameEnd);
           if (id && name) results.push({ id: id, name: name });
+          idx = end + 1;
         }
         res.writeHead(200);
-        res.end(JSON.stringify(results));
+        res.end(JSON.stringify({ conditions: results, raw: data2.substring(0, 2000) }));
       });
     });
     req2.on('error', function(e) { res.writeHead(500); res.end(JSON.stringify({error: e.message})); });
