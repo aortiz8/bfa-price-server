@@ -68,7 +68,7 @@ function refreshUserToken(cb) {
           userAccessToken = json.access_token;
           userTokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
           cb(null, userAccessToken);
-        } else { cb('Refresh error: ' + data); }
+        } else { console.log('Refresh failed:', data); cb('Refresh error: ' + data); }
       } catch(e) { cb('Refresh parse error: ' + e.message); }
     });
   });
@@ -296,7 +296,7 @@ var server = http.createServer(function(req, res) {
         var author = data.author || 'Unknown';
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
         refreshUserToken(function(err, token) {
-          if (err) { res.writeHead(200); res.end(JSON.stringify({ error: 'Not authorized. Visit https://bfa-price-server.onrender.com/auth' })); return; }
+          if (err) { res.writeHead(200); res.end(JSON.stringify({ error: 'Auth failed: ' + err })); return; }
           createDraftListing(title, description, price, conditionId, pictureUrl, language, author, token, function(result) {
             res.writeHead(200);
             res.end(JSON.stringify(result));
