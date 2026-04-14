@@ -137,9 +137,9 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     + '<CategoryMappingAllowed>true</CategoryMappingAllowed>'
     + '<ConditionID>' + conditionId + '</ConditionID>'
     + '<ItemSpecifics>'
-    + '<NameValueList><n>Book Title</n><Value>' + esc(title).substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><n>Author</n><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><n>Language</n><Value>' + esc(language || 'English') + '</Value></NameValueList>'
+    + '<NameValueList><Name>Book Title</Name><Value>' + esc(title).substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Author</Name><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Language</Name><Value>' + esc(language || 'English') + '</Value></NameValueList>'
     + '</ItemSpecifics>'
     + pictures
     + '<Country>US</Country>'
@@ -174,7 +174,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay response:', data.substring(0, 800));
+      console.log('eBay XML sent:', xmlBody.substring(0, 1000)); console.log('eBay response:', data.substring(0, 800));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) {
