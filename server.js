@@ -174,7 +174,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay CONDITIONID:', xmlBody.match(/<ConditionID>(.*?)</ConditionID>/)?.[1]); console.log('eBay response:', data.substring(0, 800));
+      var condMatch = xmlBody.indexOf('<ConditionID>'); console.log('eBay CONDITIONID:', xmlBody.substring(condMatch+13, condMatch+17)); console.log('eBay response:', data.substring(0, 800));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) {
