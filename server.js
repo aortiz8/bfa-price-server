@@ -174,7 +174,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay XML sent:', xmlBody.substring(0, 1000)); console.log('eBay response:', data.substring(0, 800));
+      console.log('eBay CONDITIONID:', xmlBody.match(/<ConditionID>(.*?)</ConditionID>/)?.[1]); console.log('eBay response:', data.substring(0, 800));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) {
@@ -247,6 +247,42 @@ var server = http.createServer(function(req, res) {
   if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
 
   if (url.pathname === '/health') { res.writeHead(200); res.end('{"status":"ok"}'); return; }
+
+  if (url.pathname === '/getitem') {
+    var itemId = url.searchParams.get('id') || '';
+    if (!itemId) { res.writeHead(400); res.end('{"error":"missing id"}'); return; }
+    var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
+      + '<ItemID>' + itemId + '</ItemID>'
+      + '<DetailLevel>ReturnAll</DetailLevel>'
+      + '</GetItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '967', 'X-EBAY-API-CALL-NAME': 'GetItem',
+        'X-EBAY-API-SITEID': '0', 'X-EBAY-API-APP-NAME': CLIENT_ID,
+        'X-EBAY-API-DEV-NAME': DEV_ID, 'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+        'Content-Length': Buffer.byteLength(xmlBody)
+      }
+    };
+    var req = https.request(opts, function(res2) {
+      var data = '';
+      res2.on('data', function(c) { data += c; });
+      res2.on('end', function() {
+        var condId = (data.match(/<ConditionID>(\d+)<\/ConditionID>/) || [])[1];
+        var condName = (data.match(/<ConditionDisplayName>(.*?)<\/ConditionDisplayName>/) || [])[1];
+        res.writeHead(200);
+        res.end(JSON.stringify({ conditionId: condId, conditionName: condName }));
+      });
+    });
+    req.on('error', function(e) { res.writeHead(500); res.end(JSON.stringify({error: e.message})); });
+    req.setTimeout(10000, function() { req.destroy(); });
+    req.write(xmlBody);
+    req.end();
+    return;
+  }
 
   var title = url.searchParams.get('title') || '';
   var author = url.searchParams.get('author') || '';
