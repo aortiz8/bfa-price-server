@@ -128,7 +128,6 @@ function createDraftListing(title, description, price, conditionId, pictureUrl, 
   var itemBody = JSON.stringify({
     availability: { shipToLocationAvailability: { quantity: 1 } },
     condition: condStr,
-    conditionDescription: condStr,
     product: product
   });
 
@@ -180,9 +179,16 @@ function createDraftListing(title, description, price, conditionId, pictureUrl, 
           listingDescription: description,
           availableQuantity: 1,
           categoryId: '261186',
-          pricingSummary: { price: { currency: 'USD', value: price.toFixed(2) } }
+          pricingSummary: { price: { currency: 'USD', value: price.toFixed(2) } },
+          tax: { applyTax: false }
         };
-        if (policies.fulfillmentPolicyId) offerData.listingPolicies = policies;
+        if (policies && policies.fulfillmentPolicyId) {
+          offerData.listingPolicies = {
+            fulfillmentPolicyId: policies.fulfillmentPolicyId,
+            returnPolicyId: policies.returnPolicyId,
+            paymentPolicyId: policies.paymentPolicyId
+          };
+        }
 
         var offerBodyStr = JSON.stringify(offerData);
         var offerOpts = {
