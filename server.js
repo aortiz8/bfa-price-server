@@ -114,19 +114,22 @@ function createDraftListing(title, description, price, conditionId, pictureUrl, 
   var sku = 'BFA-' + Date.now();
 
   // Step 1: Create inventory item
+  var product = {
+    title: title.substring(0, 80),
+    description: description,
+    aspects: {
+      'Book Title': [title.substring(0, 65)],
+      'Author': [author || 'Unknown'],
+      'Language': [language || 'English']
+    }
+  };
+  if (pictureUrl) product.imageUrls = [pictureUrl];
+
   var itemBody = JSON.stringify({
     availability: { shipToLocationAvailability: { quantity: 1 } },
     condition: condStr,
-    product: {
-      title: title.substring(0, 80),
-      description: description,
-      aspects: {
-        'Book Title': [title.substring(0, 65)],
-        'Author': [author || 'Unknown'],
-        'Language': [language || 'English']
-      },
-      imageUrls: pictureUrl ? [pictureUrl] : []
-    }
+    conditionDescription: condStr,
+    product: product
   });
 
   var itemOpts = {
