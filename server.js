@@ -118,13 +118,18 @@ function esc(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, inscribed, illustrator, topic, cb) {
+function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, cb) {
   // Schedule 7 days from now so it goes to Scheduled folder
   var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
-  var pictures = pictureUrl
-    ? '<PictureDetails><PictureURL>' + pictureUrl + '</PictureURL></PictureDetails>'
-    : '';
+  var pictures = '';
+  if(pictureUrls && pictureUrls.length > 0){
+    pictures = '<PictureDetails>';
+    for(var pi=0; pi<pictureUrls.length && pi<12; pi++){
+      pictures += '<PictureURL>' + pictureUrls[pi] + '</PictureURL>';
+    }
+    pictures += '</PictureDetails>';
+  }
 
   var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
     + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
@@ -146,7 +151,10 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     + (format ? '<NameValueList><Name>Format</Name><Value>' + esc(format) + '</Value></NameValueList>' : '')
     + (signed ? '<NameValueList><Name>Signed</Name><Value>Yes</Value></NameValueList>' : '')
     + (signedBy ? '<NameValueList><Name>Signed By</Name><Value>' + esc(signedBy).substring(0,65) + '</Value></NameValueList>' : '')
-    + (exLibrary ? '<NameValueList><Name>Ex Libris</Name><Value>Yes</Value></NameValueList>' : '')
+    + (inscribed ? '<NameValueList><n>Inscribed</n><Value>Yes</Value></NameValueList>' : '')
+    + (illustrator ? '<NameValueList><n>Illustrator</n><Value>' + esc(illustrator).substring(0,65) + '</Value></NameValueList>' : '')
+    + (topic ? '<NameValueList><n>Topic</n><Value>' + esc(topic).substring(0,65) + '</Value></NameValueList>' : '')
+    + (features && features.length > 0 ? (function(){ var xml = '<NameValueList><n>Features</n>'; for(var fi=0; fi<features.length && fi<10; fi++) xml += '<Value>' + esc(String(features[fi])).substring(0,65) + '</Value>'; xml += '</NameValueList>'; return xml; })() : '')
     + (isbn && (isbn.replace(/[^0-9]/g,'').substring(0,3) === '978' || isbn.replace(/[^0-9]/g,'').substring(0,3) === '979') ? '<NameValueList><Name>ISBN</Name><Value>' + isbn.replace(/[^0-9X]/gi,'') + '</Value></NameValueList>' : '')
     + '</ItemSpecifics>'
     + pictures
@@ -223,6 +231,7 @@ var server = http.createServer(function(req, res) {
         var isbn = data.isbn || '';
         var conditionId = parseInt(data.conditionId) || 3000;
         var pictureUrl = data.pictureUrl || '';
+        var pictureUrls = data.pictureUrls || (pictureUrl ? [pictureUrl] : []);
         var language = data.language || 'English';
         var author = data.author || 'Unknown';
         var bookTitle = data.bookTitle || title;
@@ -232,12 +241,13 @@ var server = http.createServer(function(req, res) {
         var format = data.format || '';
         var signed = data.signed || '';
         var signedBy = data.signedBy || '';
-        var exLibrary = data.exLibrary || '';
         var inscribed = data.inscribed || '';
         var illustrator = data.illustrator || '';
         var topic = data.topic || '';
+        var features = data.features || [];
+        var otherFeature = data.otherFeature || '';
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, inscribed, illustrator, topic, function(result) {
+        createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, function(result) {
           res.writeHead(200);
           res.end(JSON.stringify(result));
         });
