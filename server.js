@@ -116,12 +116,7 @@ function createDraftListing(title, description, price, conditionId, pictureUrl, 
   // Step 1: Create inventory item
   var product = {
     title: title.substring(0, 80),
-    description: description,
-    aspects: {
-      'Book Title': [title.substring(0, 65)],
-      'Author': [author || 'Unknown'],
-      'Language': [language || 'English']
-    }
+    description: description
   };
   if (pictureUrl) product.imageUrls = [pictureUrl];
 
