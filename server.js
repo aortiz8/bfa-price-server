@@ -118,7 +118,7 @@ function esc(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, cb) {
+function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, inscribed, illustrator, topic, cb) {
   // Schedule 7 days from now so it goes to Scheduled folder
   var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -232,8 +232,11 @@ var server = http.createServer(function(req, res) {
         var signed = data.signed || '';
         var signedBy = data.signedBy || '';
         var exLibrary = data.exLibrary || '';
+        var inscribed = data.inscribed || '';
+        var illustrator = data.illustrator || '';
+        var topic = data.topic || '';
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, function(result) {
+        createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, exLibrary, inscribed, illustrator, topic, function(result) {
           res.writeHead(200);
           res.end(JSON.stringify(result));
         });
