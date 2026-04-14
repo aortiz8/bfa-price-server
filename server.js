@@ -243,8 +243,12 @@ var server = http.createServer(function(req, res) {
   // OAuth callback from eBay
   if (url.pathname === '/callback') {
     var code = url.searchParams.get('code');
+    var error = url.searchParams.get('error');
+    var errorDesc = url.searchParams.get('error_description');
     if (!code) {
-      res.writeHead(400); res.end('Missing code');
+      res.setHeader('Content-Type', 'text/html');
+      res.writeHead(400);
+      res.end('<h1>No code received</h1><p>Error: ' + (error||'none') + '</p><p>Description: ' + (errorDesc||'none') + '</p><p>All params: ' + url.search + '</p>');
       return;
     }
     exchangeCodeForToken(code, function(err, json) {
