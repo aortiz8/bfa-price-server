@@ -155,6 +155,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrl,
     + '<DispatchTimeMax>2</DispatchTimeMax>'
     + '<ListingDuration>GTC</ListingDuration>'
     + '<ListingType>FixedPriceItem</ListingType>'
+    + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
     + '<Quantity>1</Quantity>'
     + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
     + '<PostalCode>92105</PostalCode>'
