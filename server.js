@@ -8,7 +8,7 @@ var DEV_ID = '3e7db631-fffe-4cd8-92b6-6bca13515742';
 var USER_TOKEN = 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 
 var COND_MAP = {
-  '1000': 'NEW', '1500': 'LIKE_NEW', '2500': 'VERY_GOOD', '3000': 'GOOD', '7000': 'ACCEPTABLE'
+  '1000': 'NEW', '1500': 'LIKE_NEW', '2500': 'VERY_GOOD', '3000': 'GOOD', '4000': 'GOOD', '5000': 'GOOD', '7000': 'ACCEPTABLE'
 };
 
 var cachedToken = null;
@@ -247,6 +247,46 @@ var server = http.createServer(function(req, res) {
   if (req.method !== 'GET') { res.writeHead(405); res.end('{}'); return; }
 
   if (url.pathname === '/health') { res.writeHead(200); res.end('{"status":"ok"}'); return; }
+
+  if (url.pathname === '/conditions') {
+    var xmlBody2 = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetCategoryFeaturesRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
+      + '<CategoryID>261186</CategoryID>'
+      + '<FeatureID>ConditionValues</FeatureID>'
+      + '<DetailLevel>ReturnAll</DetailLevel>'
+      + '</GetCategoryFeaturesRequest>';
+    var opts2 = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'Content-Type': 'text/xml',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '967', 'X-EBAY-API-CALL-NAME': 'GetCategoryFeatures',
+        'X-EBAY-API-SITEID': '0', 'X-EBAY-API-APP-NAME': CLIENT_ID,
+        'X-EBAY-API-DEV-NAME': DEV_ID, 'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+        'Content-Length': Buffer.byteLength(xmlBody2)
+      }
+    };
+    var req2 = https.request(opts2, function(res2) {
+      var data2 = '';
+      res2.on('data', function(c) { data2 += c; });
+      res2.on('end', function() {
+        var results = [];
+        var parts = data2.split('<Value>');
+        for (var i = 1; i < parts.length; i++) {
+          var id = (parts[i].match(/<ID>(\d+)<\/ID>/) || [])[1];
+          var name = (parts[i].match(/<DisplayName>(.*?)<\/DisplayName>/) || [])[1];
+          if (id && name) results.push({ id: id, name: name });
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify(results));
+      });
+    });
+    req2.on('error', function(e) { res.writeHead(500); res.end(JSON.stringify({error: e.message})); });
+    req2.setTimeout(15000, function() { req2.destroy(); });
+    req2.write(xmlBody2);
+    req2.end();
+    return;
+  }
 
   if (url.pathname === '/getitem') {
     var itemId = url.searchParams.get('id') || '';
