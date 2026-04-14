@@ -109,7 +109,7 @@ function exchangeCodeForToken(code, cb) {
 }
 
 function createDraftListing(title, description, price, conditionId, pictureUrl, language, author, userToken, cb) {
-  var condMap = { 1000:'NEW', 1500:'LIKE_NEW', 2500:'VERY_GOOD', 3000:'GOOD', 7000:'ACCEPTABLE' };
+  var condMap = { 1000:'NEW', 1500:'LIKE_NEW', 2500:'USED_VERY_GOOD', 3000:'USED_GOOD', 7000:'USED_ACCEPTABLE' };
   var condStr = condMap[conditionId] || 'GOOD';
   var sku = 'BFA-' + Date.now();
 
