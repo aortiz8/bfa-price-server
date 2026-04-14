@@ -118,7 +118,7 @@ function esc(s) {
   return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, cb) {
+function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, cb) {
   // Schedule 7 days from now so it goes to Scheduled folder
   var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -155,6 +155,8 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     + (illustrator ? '<NameValueList><n>Illustrator</n><Value>' + esc(illustrator).substring(0,65) + '</Value></NameValueList>' : '')
     + (topic ? '<NameValueList><n>Topic</n><Value>' + esc(topic).substring(0,65) + '</Value></NameValueList>' : '')
     + (features && features.length > 0 ? (function(){ var xml = '<NameValueList><n>Features</n>'; for(var fi=0; fi<features.length && fi<10; fi++) xml += '<Value>' + esc(String(features[fi])).substring(0,65) + '</Value>'; xml += '</NameValueList>'; return xml; })() : '')
+    + (vintage ? '<NameValueList><n>Vintage</n><Value>Yes</Value></NameValueList>' : '')
+    + (sku ? '<NameValueList><n>Custom SKU</n><Value>' + esc(sku).substring(0,65) + '</Value></NameValueList>' : '')
     + (isbn && (isbn.replace(/[^0-9]/g,'').substring(0,3) === '978' || isbn.replace(/[^0-9]/g,'').substring(0,3) === '979') ? '<NameValueList><Name>ISBN</Name><Value>' + isbn.replace(/[^0-9X]/gi,'') + '</Value></NameValueList>' : '')
     + '</ItemSpecifics>'
     + pictures
@@ -244,10 +246,12 @@ var server = http.createServer(function(req, res) {
         var inscribed = data.inscribed || '';
         var illustrator = data.illustrator || '';
         var topic = data.topic || '';
+        var vintage = data.vintage || '';
+        var sku = data.sku || '';
         var features = data.features || [];
         var otherFeature = data.otherFeature || '';
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, function(result) {
+        createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, function(result) {
           res.writeHead(200);
           res.end(JSON.stringify(result));
         });
