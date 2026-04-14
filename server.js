@@ -5,23 +5,17 @@ var PORT = process.env.PORT || 3000;
 var CLIENT_ID = 'CodexBro-Booksfor-PRD-66c135696-2728b4d0';
 var CLIENT_SECRET = 'PRD-6c135696e4a6-8789-475a-8eaf-1662';
 var DEV_ID = '3e7db631-fffe-4cd8-92b6-6bca13515742';
-var RUNAME = 'Codex_Brothers_-CodexBro-Booksf-ixdtwam';
 var USER_TOKEN = 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 
 var COND_MAP = {
   '1000': 'NEW', '1500': 'LIKE_NEW', '2500': 'VERY_GOOD', '3000': 'GOOD', '7000': 'ACCEPTABLE'
 };
 
-// OAuth user token storage
-var userAccessToken = null;
-var userRefreshToken = 'v^1.1#i^1#f^0#I^3#r^1#p^3#t^Ul4xMF84OkZBODQ2ODc2OUFEMUEzRTg2NjExQkVFMkI1QkRCMDc1XzJfMSNFXjI2MA==';
-var userTokenExpiry = 0;
+var cachedToken = null;
+var tokenExpiry = 0;
 
-var cachedAppToken = null;
-var appTokenExpiry = 0;
-
-function getAppToken(cb) {
-  if (cachedAppToken && Date.now() < appTokenExpiry) { cb(null, cachedAppToken); return; }
+function getToken(cb) {
+  if (cachedToken && Date.now() < tokenExpiry) { cb(null, cachedToken); return; }
   var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
   var body = 'grant_type=client_credentials&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope';
   var opts = {
@@ -35,9 +29,9 @@ function getAppToken(cb) {
       try {
         var json = JSON.parse(data);
         if (json.access_token) {
-          cachedAppToken = json.access_token;
-          appTokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
-          cb(null, cachedAppToken);
+          cachedToken = json.access_token;
+          tokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
+          cb(null, cachedToken);
         } else { cb('Token error: ' + data); }
       } catch(e) { cb('Token parse error: ' + e.message); }
     });
@@ -45,254 +39,6 @@ function getAppToken(cb) {
   req.on('error', function(e) { cb(e.message); });
   req.setTimeout(10000, function() { req.destroy(); cb('Timeout'); });
   req.write(body);
-  req.end();
-}
-
-function refreshUserToken(cb) {
-  if (!userRefreshToken) { cb('No refresh token - visit /auth first'); return; }
-  if (userAccessToken && Date.now() < userTokenExpiry) { cb(null, userAccessToken); return; }
-  var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
-  var body = 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(userRefreshToken)
-    + '&scope=https%3A%2F%2Fapi.ebay.com%2Foauth%2Fapi_scope%2Fsell.inventory';
-  var opts = {
-    hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Basic ' + credentials, 'Content-Length': Buffer.byteLength(body) }
-  };
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      try {
-        var json = JSON.parse(data);
-        if (json.access_token) {
-          userAccessToken = json.access_token;
-          userTokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
-          cb(null, userAccessToken);
-        } else { console.log('Refresh failed:', data); cb('Refresh error: ' + data); }
-      } catch(e) { cb('Refresh parse error: ' + e.message); }
-    });
-  });
-  req.on('error', function(e) { cb(e.message); });
-  req.setTimeout(10000, function() { req.destroy(); cb('Timeout'); });
-  req.write(body);
-  req.end();
-}
-
-function exchangeCodeForToken(code, cb) {
-  var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
-  var body = 'grant_type=authorization_code&code=' + encodeURIComponent(code)
-    + '&redirect_uri=' + encodeURIComponent(RUNAME);
-  var opts = {
-    hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Basic ' + credentials, 'Content-Length': Buffer.byteLength(body) }
-  };
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      try {
-        var json = JSON.parse(data);
-        if (json.access_token) {
-          userAccessToken = json.access_token;
-          userRefreshToken = json.refresh_token;
-          userTokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
-          console.log('SAVE THIS REFRESH TOKEN:', json.refresh_token);
-          cb(null, json);
-        } else { cb('Exchange error: ' + data); }
-      } catch(e) { cb('Exchange parse error: ' + e.message); }
-    });
-  });
-  req.on('error', function(e) { cb(e.message); });
-  req.setTimeout(10000, function() { req.destroy(); cb('Timeout'); });
-  req.write(body);
-  req.end();
-}
-
-function createDraftListing(title, description, price, conditionId, pictureUrl, language, author, userToken, cb) {
-  var condMap = { 1000:'NEW', 1500:'LIKE_NEW', 2500:'USED_VERY_GOOD', 3000:'USED_GOOD', 7000:'USED_ACCEPTABLE' };
-  var condStr = condMap[conditionId] || 'GOOD';
-  var sku = 'BFA-' + Date.now();
-
-  // Step 1: Create inventory item
-  var product = {
-    title: title.substring(0, 80)
-  };
-  if (pictureUrl) product.imageUrls = [pictureUrl];
-
-  var itemBody = JSON.stringify({
-    availability: { shipToLocationAvailability: { quantity: 1 } },
-    condition: condStr,
-    product: product
-  });
-
-  var itemOpts = {
-    hostname: 'api.ebay.com',
-    path: '/sell/inventory/v1/inventory_item/' + sku,
-    method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + userToken,
-      'Content-Language': 'en-US',
-      'Content-Length': Buffer.byteLength(itemBody)
-    }
-  };
-
-  var req1 = https.request(itemOpts, function(res1) {
-    var data1 = '';
-    res1.on('data', function(c) { data1 += c; });
-    res1.on('end', function() {
-      console.log('Inventory item response:', res1.statusCode, data1.substring(0, 300));
-      if (res1.statusCode !== 200 && res1.statusCode !== 204) {
-        cb({ error: 'Inventory item failed: ' + data1.substring(0, 200) });
-        return;
-      }
-
-      // Step 2: Create offer (unpublished = draft)
-      var offerBody = JSON.stringify({
-        sku: sku,
-        marketplaceId: 'EBAY_US',
-        format: 'FIXED_PRICE',
-        listingDescription: description,
-        availableQuantity: 1,
-        categoryId: '261186',
-        listingPolicies: {
-          fulfillmentPolicyId: '',
-          paymentPolicyId: '',
-          returnPolicyId: ''
-        },
-        pricingSummary: { price: { currency: 'USD', value: price.toFixed(2) } },
-        merchantLocationKey: 'default'
-      });
-
-      // Fetch policies first then create offer
-      getPolicyIds(userToken, function(policies) {
-        var offerData = {
-          sku: sku,
-          marketplaceId: 'EBAY_US',
-          format: 'FIXED_PRICE',
-          listingDescription: description,
-          availableQuantity: 1,
-          categoryId: '261186',
-          pricingSummary: { price: { currency: 'USD', value: price.toFixed(2) } },
-          tax: { applyTax: false }
-        };
-        if (policies && policies.fulfillmentPolicyId) {
-          offerData.listingPolicies = {
-            fulfillmentPolicyId: policies.fulfillmentPolicyId,
-            returnPolicyId: policies.returnPolicyId,
-            paymentPolicyId: policies.paymentPolicyId
-          };
-        }
-
-        var offerBodyStr = JSON.stringify(offerData);
-        var offerOpts = {
-          hostname: 'api.ebay.com',
-          path: '/sell/inventory/v1/offer',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + userToken,
-            'Content-Language': 'en-US',
-            'Content-Length': Buffer.byteLength(offerBodyStr)
-          }
-        };
-
-        var req2 = https.request(offerOpts, function(res2) {
-          var data2 = '';
-          res2.on('data', function(c) { data2 += c; });
-          res2.on('end', function() {
-            console.log('Offer response:', res2.statusCode, data2.substring(0, 500));
-            try {
-              var json = JSON.parse(data2);
-              if (json.offerId) {
-                cb({ listingId: json.offerId, message: 'Draft created in eBay Drafts folder' });
-              } else {
-                cb({ error: JSON.stringify(json).substring(0, 300) });
-              }
-            } catch(e) { cb({ error: 'Parse error: ' + e.message + ' raw: ' + data2.substring(0,200) }); }
-          });
-        });
-        req2.on('error', function(e) { cb({ error: e.message }); });
-        req2.setTimeout(20000, function() { req2.destroy(); cb({ error: 'Timeout' }); });
-        req2.write(offerBodyStr);
-        req2.end();
-      });
-    });
-  });
-  req1.on('error', function(e) { cb({ error: e.message }); });
-  req1.setTimeout(20000, function() { req1.destroy(); cb({ error: 'Timeout' }); });
-  req1.write(itemBody);
-  req1.end();
-}
-
-function getPolicyIds(userToken, cb) {
-  // Get fulfillment policies
-  var opts = {
-    hostname: 'api.ebay.com',
-    path: '/sell/account/v1/fulfillment_policy?marketplace_id=EBAY_US',
-    method: 'GET',
-    headers: { 'Authorization': 'Bearer ' + userToken, 'Content-Type': 'application/json' }
-  };
-  var req = https.request(opts, function(res) {
-    var data = '';
-    res.on('data', function(c) { data += c; });
-    res.on('end', function() {
-      console.log('Policies response:', data.substring(0, 500));
-      try {
-        var json = JSON.parse(data);
-        var policies = json.fulfillmentPolicies || [];
-        // Find media mail policy
-        var ship = policies.find(function(p) { return p.name && p.name.indexOf('Shipping') > -1; }) || policies[0];
-        if (!ship) { cb({}); return; }
-        // Now get return policy
-        var opts2 = {
-          hostname: 'api.ebay.com',
-          path: '/sell/account/v1/return_policy?marketplace_id=EBAY_US',
-          method: 'GET',
-          headers: { 'Authorization': 'Bearer ' + userToken, 'Content-Type': 'application/json' }
-        };
-        var req2 = https.request(opts2, function(res2) {
-          var data2 = '';
-          res2.on('data', function(c) { data2 += c; });
-          res2.on('end', function() {
-            try {
-              var json2 = JSON.parse(data2);
-              var retPolicies = json2.returnPolicies || [];
-              var ret = retPolicies[0];
-              // Get payment policy
-              var opts3 = {
-                hostname: 'api.ebay.com',
-                path: '/sell/account/v1/payment_policy?marketplace_id=EBAY_US',
-                method: 'GET',
-                headers: { 'Authorization': 'Bearer ' + userToken, 'Content-Type': 'application/json' }
-              };
-              var req3 = https.request(opts3, function(res3) {
-                var data3 = '';
-                res3.on('data', function(c) { data3 += c; });
-                res3.on('end', function() {
-                  try {
-                    var json3 = JSON.parse(data3);
-                    var payPolicies = json3.paymentPolicies || [];
-                    var pay = payPolicies[0];
-                    cb({
-                      fulfillmentPolicyId: ship ? ship.fulfillmentPolicyId : '',
-                      returnPolicyId: ret ? ret.returnPolicyId : '',
-                      paymentPolicyId: pay ? pay.paymentPolicyId : ''
-                    });
-                  } catch(e) { cb({}); }
-                });
-              });
-              req3.on('error', function() { cb({}); });
-              req3.end();
-            } catch(e) { cb({}); }
-          });
-        });
-        req2.on('error', function() { cb({}); });
-        req2.end();
-      } catch(e) { cb({}); }
-    });
-  });
-  req.on('error', function() { cb({}); });
   req.end();
 }
 
@@ -368,55 +114,92 @@ function uploadPicture(imgBuffer, cb) {
   req.end();
 }
 
+function esc(s) {
+  return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, cb) {
+  // Schedule 7 days from now so it goes to Scheduled folder
+  var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+
+  var pictures = pictureUrl
+    ? '<PictureDetails><PictureURL>' + pictureUrl + '</PictureURL></PictureDetails>'
+    : '';
+
+  var xmlBody = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<RequesterCredentials><eBayAuthToken>' + USER_TOKEN + '</eBayAuthToken></RequesterCredentials>'
+    + '<Item>'
+    + '<Title>' + esc(title).substring(0, 80) + '</Title>'
+    + '<Description><![CDATA[' + description + ']]></Description>'
+    + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
+    + '<StartPrice>' + price.toFixed(2) + '</StartPrice>'
+    + '<CategoryMappingAllowed>true</CategoryMappingAllowed>'
+    + '<ConditionID>' + conditionId + '</ConditionID>'
+    + '<ItemSpecifics>'
+    + '<NameValueList><n>Book Title</n><Value>' + esc(title).substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><n>Author</n><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><n>Language</n><Value>' + esc(language || 'English') + '</Value></NameValueList>'
+    + '</ItemSpecifics>'
+    + pictures
+    + '<Country>US</Country>'
+    + '<Currency>USD</Currency>'
+    + '<DispatchTimeMax>2</DispatchTimeMax>'
+    + '<ListingDuration>GTC</ListingDuration>'
+    + '<ListingType>FixedPriceItem</ListingType>'
+    + '<Quantity>1</Quantity>'
+    + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
+    + '<PostalCode>92105</PostalCode>'
+    + '<SellerProfiles>'
+    + '<SellerShippingProfile><ShippingProfileName>Shipping 2020-01-02</ShippingProfileName></SellerShippingProfile>'
+    + '<SellerReturnProfile><ReturnProfileName>Returns Accepted,Buyer,30 Days,Money Back#0</ReturnProfileName></SellerReturnProfile>'
+    + '<SellerPaymentProfile><PaymentProfileName>eBay Payments</PaymentProfileName></SellerPaymentProfile>'
+    + '</SellerProfiles>'
+    + '<Site>US</Site>'
+    + '</Item>'
+    + '</AddItemRequest>';
+
+  var opts = {
+    hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+    headers: {
+      'Content-Type': 'text/xml',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '967', 'X-EBAY-API-CALL-NAME': 'AddItem',
+      'X-EBAY-API-SITEID': '0', 'X-EBAY-API-APP-NAME': CLIENT_ID,
+      'X-EBAY-API-DEV-NAME': DEV_ID, 'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+      'Content-Length': Buffer.byteLength(xmlBody)
+    }
+  };
+
+  var req = https.request(opts, function(res) {
+    var data = '';
+    res.on('data', function(c) { data += c; });
+    res.on('end', function() {
+      console.log('eBay response:', data.substring(0, 800));
+      var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
+      var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
+      if (idMatch) {
+        cb({ listingId: idMatch[1] });
+      } else {
+        cb({ error: errMatch ? errMatch[1] : 'Unknown eBay error', raw: data.substring(0, 500) });
+      }
+    });
+  });
+  req.on('error', function(e) { cb({ error: e.message }); });
+  req.setTimeout(20000, function() { req.destroy(); cb({ error: 'Timeout' }); });
+  req.write(xmlBody);
+  req.end();
+}
+
 var server = http.createServer(function(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Content-Type', 'application/json');
 
-  if (req.method === 'OPTIONS') { res.setHeader('Content-Type','application/json'); res.writeHead(200); res.end(); return; }
+  if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
   var url = new URL(req.url, 'http://localhost');
 
-  // OAuth callback from eBay
-  if (url.pathname === '/callback') {
-    var code = url.searchParams.get('code');
-    var error = url.searchParams.get('error');
-    var errorDesc = url.searchParams.get('error_description');
-    if (!code) {
-      res.setHeader('Content-Type', 'text/html');
-      res.writeHead(400);
-      res.end('<h1>No code received</h1><p>Error: ' + (error||'none') + '</p><p>Description: ' + (errorDesc||'none') + '</p><p>All params: ' + url.search + '</p>');
-      return;
-    }
-    exchangeCodeForToken(code, function(err, json) {
-      res.setHeader('Content-Type', 'text/html');
-      if (err) {
-        res.writeHead(500);
-        res.end('<h1>Auth failed: ' + err + '</h1>');
-      } else {
-        // Store refresh token in memory and show success
-        res.writeHead(200);
-        res.end('<h1>Auth successful!</h1><p>Refresh token saved. You can close this window.</p><p>Refresh token: <code>' + json.refresh_token + '</code></p><p><strong>Copy this refresh token and add it to your server as REFRESH_TOKEN variable!</strong></p>');
-      }
-    });
-    return;
-  }
-
-  // Auth redirect to eBay
-  if (url.pathname === '/auth') {
-    var scope = 'https://api.ebay.com/oauth/api_scope/sell.inventory';
-    var authUrl = 'https://auth.ebay.com/oauth2/authorize?client_id=' + CLIENT_ID
-      + '&response_type=code&redirect_uri=' + encodeURIComponent(RUNAME)
-      + '&scope=' + encodeURIComponent(scope);
-    res.setHeader('Content-Type', 'text/html');
-    res.writeHead(200);
-    res.end('<h1>Click to authorize eBay</h1><a href="' + authUrl + '" style="font-size:24px;padding:20px;background:#0064d2;color:white;text-decoration:none;border-radius:8px;">Authorize with eBay</a>');
-    return;
-  }
-
-  res.setHeader('Content-Type', 'application/json');
-
-  // /list — POST only
   if (url.pathname === '/list') {
     if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
     var body = '';
@@ -427,17 +210,15 @@ var server = http.createServer(function(req, res) {
         var title = data.title || '';
         var description = data.description || '';
         var price = parseFloat(data.price) || 9.99;
+        var isbn = data.isbn || '';
         var conditionId = parseInt(data.conditionId) || 3000;
         var pictureUrl = data.pictureUrl || '';
         var language = data.language || 'English';
         var author = data.author || 'Unknown';
         if (!title) { res.writeHead(400); res.end('{"error":"missing title"}'); return; }
-        refreshUserToken(function(err, token) {
-          if (err) { res.writeHead(200); res.end(JSON.stringify({ error: 'Auth failed: ' + err })); return; }
-          createDraftListing(title, description, price, conditionId, pictureUrl, language, author, token, function(result) {
-            res.writeHead(200);
-            res.end(JSON.stringify(result));
-          });
+        createListing(title, description, price, isbn, conditionId, pictureUrl, language, author, function(result) {
+          res.writeHead(200);
+          res.end(JSON.stringify(result));
         });
       } catch(e) {
         res.writeHead(400);
@@ -447,7 +228,6 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // /upload — POST only
   if (url.pathname === '/upload') {
     if (req.method !== 'POST') { res.writeHead(405); res.end('{}'); return; }
     var body = '';
@@ -479,7 +259,7 @@ var server = http.createServer(function(req, res) {
 
   var kw = isbn ? isbn : (title + (author ? ' ' + author : '') + (signed ? ' signed' : ''));
 
-  getAppToken(function(err, token) {
+  getToken(function(err, token) {
     if (err) { res.writeHead(200); res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 })); return; }
 
     if (url.pathname === '/sold' || url.pathname === '/price') {
