@@ -8,7 +8,7 @@ var DEV_ID = '3e7db631-fffe-4cd8-92b6-6bca13515742';
 var USER_TOKEN = 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 
 var COND_MAP = {
-  '1000': 'NEW', '1500': 'LIKE_NEW', '2500': 'VERY_GOOD', '3000': 'GOOD', '4000': 'GOOD', '5000': 'GOOD', '7000': 'ACCEPTABLE'
+  '1000': 'NEW', '2750': 'LIKE_NEW', '4000': 'VERY_GOOD', '5000': 'GOOD', '6000': 'ACCEPTABLE'
 };
 
 var cachedToken = null;
