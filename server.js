@@ -371,13 +371,16 @@ var server = http.createServer(function(req, res) {
   var title = url.searchParams.get('title') || '';
   var author = url.searchParams.get('author') || '';
   var isbn = (url.searchParams.get('isbn') || '').replace(/[^0-9X]/gi, '');
+  var year = url.searchParams.get('year') || '';
+  var publisher = url.searchParams.get('publisher') || '';
   var cond = url.searchParams.get('condition') || '3000';
   var signed = url.searchParams.get('signed') === '1';
   var conditionId = COND_MAP[cond] || 'GOOD'; // search filter only
 
   if (!title && !isbn) { res.writeHead(400); res.end('{"error":"missing title or isbn"}'); return; }
 
-  var kw = isbn ? isbn : (title + (author ? ' ' + author : '') + (signed ? ' signed' : ''));
+  var kwParts = [title, author, year, publisher].filter(Boolean);
+  var kw = isbn ? isbn : (kwParts.join(' ') + (signed ? ' signed' : ''));
 
   getToken(function(err, token) {
     if (err) { res.writeHead(200); res.end(JSON.stringify({ error: 'Auth error: ' + err, average: null, count: 0 })); return; }
@@ -385,7 +388,7 @@ var server = http.createServer(function(req, res) {
     if (url.pathname === '/sold' || url.pathname === '/price') {
       searchEbay(kw, conditionId, token, function(result, searchErr) {
         if (searchErr && isbn && title && url.pathname === '/price') {
-          var kw2 = title + (author ? ' ' + author : '') + (signed ? ' signed' : '');
+          var kw2 = [title, author, year, publisher].filter(Boolean).join(' ') + (signed ? ' signed' : '');
           searchEbay(kw2, conditionId, token, function(r2, e2) {
             res.writeHead(200);
             res.end(JSON.stringify(e2 ? { error: e2, average: null, count: 0 } : r2));
