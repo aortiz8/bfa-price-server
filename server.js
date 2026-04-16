@@ -532,11 +532,25 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Admin login check ──
+  if (pathname === '/admin/login' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var key = (data.key || '').replace(/[\r\n\s]/g,'').trim();
+      console.log('Login attempt, key length:', key.length, 'expected length:', ADMIN_KEY.length);
+      if (key === ADMIN_KEY) {
+        res.writeHead(200); res.end(JSON.stringify({ success: true }));
+      } else {
+        res.writeHead(403); res.end(JSON.stringify({ success: false, error: 'Invalid admin key' }));
+      }
+    });
+    return;
+  }
+
   // ══════════════════════════════════════════
   // ADMIN ENDPOINTS - require admin key
   // ══════════════════════════════════════════
 
-  var adminKey = req.headers['x-admin-key'] || '';
+  var adminKey = (req.headers['x-admin-key'] || '').replace(/[\r\n\s]/g,'').trim();
   var isAdmin = adminKey === ADMIN_KEY;
 
   // ── Get all subscribers (admin only) ──
