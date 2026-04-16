@@ -749,10 +749,10 @@ connectMongo(function(err) {
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
     // Seed default subscriber if not exists
-    db.collection('subscribers').findOne({ code: 'Booksforages1!' })
-      .then(function(existing) {
-      if (!existing) {
-        return db.collection('subscribers').insertOne({
+    // Always upsert default subscriber with latest eBay credentials
+    db.collection('subscribers').updateOne(
+      { code: 'Booksforages1!' },
+      { $set: {
           code: 'Booksforages1!',
           businessName: 'Books for Ages HQ',
           email: 'Codexbrothers@yahoo.com',
@@ -769,15 +769,13 @@ connectMongo(function(err) {
           ebayClientSecret: CLIENT_SECRET,
           ebayDevId: DEV_ID,
           ebayUserToken: USER_TOKEN,
-          createdAt: new Date().toISOString(),
           notes: 'Master admin account'
-        })
-        .then(function() { console.log('Default subscriber seeded successfully'); })
-        .catch(function(err) { console.log('Seed error:', err.message); });
-      } else {
-        console.log('Default subscriber already exists');
-      }
-    });
+        }
+      },
+      { upsert: true }
+    )
+    .then(function() { console.log('Default subscriber upserted successfully'); })
+    .catch(function(err) { console.log('Seed error:', err.message); });
   }
   scheduleDailyReports();
 });
