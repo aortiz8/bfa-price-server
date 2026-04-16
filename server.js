@@ -13,7 +13,7 @@ var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4
 var ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
 var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
 var MONGODB_URI = (process.env.MONGODB_URI || 'mongodb+srv://booksforagesbookmobile_db_user:nkBsVNFyqDEUGWQv@booksforages.w8exzl5.mongodb.net/booksforages?retryWrites=true&w=majority&appName=booksforages').replace(/[\r\n]/g,'').trim();
-var ADMIN_KEY = (process.env.ADMIN_KEY || 'bfa-admin-2025-secret').trim();
+var ADMIN_KEY = (process.env.ADMIN_KEY || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
 
 // MongoDB connection
 var db = null;
