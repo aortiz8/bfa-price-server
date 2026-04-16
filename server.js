@@ -26,15 +26,16 @@ function connectMongo(cb) {
     var mongodb = require('mongodb');
     var client = new mongodb.MongoClient(MONGODB_URI, {
       serverSelectionTimeoutMS: 10000,
-      connectTimeoutMS: 10000,
-      socketTimeoutMS: 10000
+      connectTimeoutMS: 10000
     });
-    client.connect(function(err) {
-      if (err) { console.log('MongoDB connect error:', err.message); cb(err); return; }
+    client.connect().then(function() {
       mongoClient = client;
       db = client.db('booksforages');
       console.log('MongoDB connected successfully');
       cb(null, db);
+    }).catch(function(err) {
+      console.log('MongoDB connect error:', err.message);
+      cb(err.message);
     });
   } catch(e) {
     console.log('MongoDB error:', e.message);
