@@ -161,17 +161,22 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Get subscriber by access code
+// Get subscriber by access code - case-insensitive search
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      // Try exact match first, then uppercase
-      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
-      cb(null, sub || null);
+      // Case-insensitive search in memory
+      var found = null;
+      var codeLower = code.toLowerCase();
+      Object.keys(inMemorySubscribers).forEach(function(k) {
+        if (k.toLowerCase() === codeLower) found = inMemorySubscribers[k];
+      });
+      cb(null, found || null);
       return;
     }
-    // Try exact match first, then uppercase
-    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
+    // Case-insensitive search in MongoDB using regex
+    var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    database.collection('subscribers').findOne({ code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } })
       .then(function(sub) { cb(null, sub); })
       .catch(function(err) { cb(err); });
   });
@@ -524,7 +529,6 @@ var server = http.createServer(function(req, res) {
 
         createListing(data.title, data.description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, function(err, listingId) {
           if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-          // Log the listing
           logListing({
             subscriberCode: code,
             employee: data.employee || 'Unknown',
@@ -711,7 +715,6 @@ var server = http.createServer(function(req, res) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-        // Only allow updating safe fields
         var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
@@ -748,8 +751,6 @@ connectMongo(function(err) {
     console.log('MongoDB connection FAILED:', JSON.stringify(err));
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
-    // Seed default subscriber if not exists
-    // Always upsert default subscriber with latest eBay credentials
     db.collection('subscribers').updateOne(
       { code: 'Booksforages1!' },
       { $set: {
