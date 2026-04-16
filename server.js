@@ -211,8 +211,9 @@ function sendDailyReports() {
   var today = new Date().toISOString().split('T')[0];
   connectMongo(function(err, database) {
     if (err || !database) return;
-    database.collection('listings').find({ date: today }).toArray(function(err, listings) {
-      if (err || !listings.length) return;
+    database.collection('listings').find({ date: today }).toArray()
+      .then(function(listings) {
+      if (!listings.length) return;
       var bySubscriber = {};
       listings.forEach(function(l) {
         if (!bySubscriber[l.subscriberCode]) bySubscriber[l.subscriberCode] = [];
@@ -436,7 +437,11 @@ var server = http.createServer(function(req, res) {
           valid: true,
           businessName: sub.businessName,
           employees: sub.employees || [],
-          reportEmail: sub.email
+          reportEmail: sub.email,
+          ebayClientId: sub.ebayClientId || '',
+          ebayClientSecret: sub.ebayClientSecret || '',
+          ebayDevId: sub.ebayDevId || '',
+          ebayUserToken: sub.ebayUserToken || ''
         }));
       });
     });
@@ -574,9 +579,9 @@ var server = http.createServer(function(req, res) {
         res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify(Object.values(inMemorySubscribers)));
         return;
       }
-      database.collection('subscribers').find({}).toArray(function(err, subs) {
-        res.writeHead(200); res.end(JSON.stringify(err ? [] : subs));
-      });
+      database.collection('subscribers').find({}).toArray()
+        .then(function(subs) { res.writeHead(200); res.end(JSON.stringify(subs)); })
+        .catch(function() { res.writeHead(200); res.end('[]'); });
     });
     return;
   }
@@ -627,9 +632,9 @@ var server = http.createServer(function(req, res) {
           } else { res.writeHead(404); res.end('{}'); }
           return;
         }
-        database.collection('subscribers').updateOne({ code: code }, { $set: data }, function(err) {
-          res.writeHead(200); res.end(JSON.stringify(err ? { error: err.message } : { success: true }));
-        });
+        database.collection('subscribers').updateOne({ code: code }, { $set: data })
+          .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+          .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
       });
     });
     return;
@@ -673,9 +678,9 @@ var server = http.createServer(function(req, res) {
       }
       var query = { date: dateFilter };
       if (subFilter) query.subscriberCode = subFilter.toUpperCase();
-      database.collection('listings').find(query).sort({ createdAt: -1 }).toArray(function(err, listings) {
-        res.writeHead(200); res.end(JSON.stringify(err ? [] : listings));
-      });
+      database.collection('listings').find(query).sort({ createdAt: -1 }).toArray()
+        .then(function(listings) { res.writeHead(200); res.end(JSON.stringify(listings)); })
+        .catch(function() { res.writeHead(200); res.end('[]'); });
     });
     return;
   }
@@ -692,9 +697,9 @@ var server = http.createServer(function(req, res) {
           res.writeHead(200); res.end(JSON.stringify(filtered));
           return;
         }
-        database.collection('listings').find({ subscriberCode: code, date: dateFilter }).sort({ createdAt: -1 }).toArray(function(err, listings) {
-          res.writeHead(200); res.end(JSON.stringify(err ? [] : listings));
-        });
+        database.collection('listings').find({ subscriberCode: code, date: dateFilter }).sort({ createdAt: -1 }).toArray()
+          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify(listings)); })
+          .catch(function() { res.writeHead(200); res.end('[]'); });
       });
     });
     return;
@@ -715,9 +720,9 @@ var server = http.createServer(function(req, res) {
             res.writeHead(200); res.end(JSON.stringify({ success: true }));
             return;
           }
-          database.collection('subscribers').updateOne({ code: code }, { $set: allowed }, function(err) {
-            res.writeHead(200); res.end(JSON.stringify(err ? { error: err.message } : { success: true }));
-          });
+          database.collection('subscribers').updateOne({ code: code }, { $set: allowed })
+            .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+            .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
         });
       });
     });
