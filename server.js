@@ -723,7 +723,8 @@ var server = http.createServer(function(req, res) {
             res.writeHead(200); res.end(JSON.stringify({ success: true }));
             return;
           }
-          database.collection('subscribers').updateOne({ code: code }, { $set: allowed })
+          // Use sub.code (actual stored code) not incoming code to avoid case mismatch
+          database.collection('subscribers').updateOne({ code: sub.code }, { $set: allowed })
             .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
             .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
         });
