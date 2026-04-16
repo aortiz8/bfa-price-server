@@ -165,11 +165,13 @@ function esc(s) {
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      var sub = inMemorySubscribers[code.toUpperCase()];
+      // Try exact match first, then uppercase
+      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
       cb(null, sub || null);
       return;
     }
-    database.collection('subscribers').findOne({ code: code.toUpperCase() }, cb);
+    // Try exact match first, then uppercase
+    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] }, cb);
   });
 }
 
@@ -424,7 +426,7 @@ var server = http.createServer(function(req, res) {
   // ── Validate access code ──
   if (req.method === 'POST' && pathname === '/validate-code') {
     parseBody(req, function(err, data) {
-      var code = (data.code || '').toUpperCase();
+      var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       getSubscriber(code, function(err, sub) {
         if (err || !sub) { res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'Invalid access code' })); return; }
         if (!sub.active) { res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'Your subscription is inactive. Please contact Books for Ages.' })); return; }
@@ -689,7 +691,7 @@ var server = http.createServer(function(req, res) {
   // ── Subscriber self-service: update own settings ──
   if (pathname === '/my/settings' && req.method === 'PUT') {
     parseBody(req, function(err, data) {
-      var code = (data.code || '').toUpperCase();
+      var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
         // Only allow updating safe fields
