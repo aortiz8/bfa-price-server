@@ -12,7 +12,7 @@ var DEV_ID = process.env.EBAY_DEV_ID || '3e7db631-fffe-4cd8-92b6-6bca13515742';
 var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 var ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
 var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
-var MONGODB_URI = (process.env.MONGODB_URI || '').trim();
+var MONGODB_URI = (process.env.MONGODB_URI || '').replace(/\r/g,'').replace(/\n/g,'').replace(/\s/g,'').trim();
 var ADMIN_KEY = process.env.ADMIN_KEY || 'bfa-admin-2025-secret';
 
 // MongoDB connection
