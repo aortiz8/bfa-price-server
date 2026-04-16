@@ -702,9 +702,15 @@ var server = http.createServer(function(req, res) {
   res.writeHead(404); res.end('{}');
 });
 
-// Initialize
+// Initialize - connect to MongoDB on startup
+console.log('Attempting MongoDB connection...');
+console.log('MongoDB URI configured:', MONGODB_URI ? 'YES' : 'NO');
 connectMongo(function(err) {
-  if (err) console.log('Running without MongoDB:', err);
+  if (err) {
+    console.log('MongoDB connection FAILED:', JSON.stringify(err));
+  } else {
+    console.log('MongoDB connection SUCCESS - db ready');
+  }
   scheduleDailyReports();
 });
 
