@@ -171,7 +171,9 @@ function getSubscriber(code, cb) {
       return;
     }
     // Try exact match first, then uppercase
-    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] }, cb);
+    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
+      .then(function(sub) { cb(null, sub); })
+      .catch(function(err) { cb(err); });
   });
 }
 
@@ -256,9 +258,9 @@ function logListing(data, cb) {
       if (cb) cb(null, entry);
       return;
     }
-    database.collection('listings').insertOne(entry, function(err, result) {
-      if (cb) cb(err, entry);
-    });
+    database.collection('listings').insertOne(entry)
+      .then(function() { if (cb) cb(null, entry); })
+      .catch(function(err) { if (cb) cb(err); });
   });
 }
 
@@ -604,9 +606,9 @@ var server = http.createServer(function(req, res) {
           res.writeHead(200); res.end(JSON.stringify(sub));
           return;
         }
-        database.collection('subscribers').insertOne(sub, function(err) {
-          res.writeHead(200); res.end(JSON.stringify(err ? { error: err.message } : sub));
-        });
+        database.collection('subscribers').insertOne(sub)
+          .then(function() { res.writeHead(200); res.end(JSON.stringify(sub)); })
+          .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
       });
     });
     return;
@@ -645,12 +647,13 @@ var server = http.createServer(function(req, res) {
         } else { res.writeHead(404); res.end('{}'); }
         return;
       }
-      database.collection('subscribers').findOne({ code: code }, function(err, sub) {
-        if (!sub) { res.writeHead(404); res.end('{}'); return; }
-        database.collection('subscribers').updateOne({ code: code }, { $set: { active: !sub.active } }, function(err) {
-          res.writeHead(200); res.end(JSON.stringify({ active: !sub.active }));
-        });
-      });
+      database.collection('subscribers').findOne({ code: code })
+        .then(function(sub) {
+          if (!sub) { res.writeHead(404); res.end('{}'); return; }
+          return database.collection('subscribers').updateOne({ code: code }, { $set: { active: !sub.active } })
+            .then(function() { res.writeHead(200); res.end(JSON.stringify({ active: !sub.active })); });
+        })
+        .catch(function(err) { res.writeHead(500); res.end('{}'); });
     });
     return;
   }
@@ -741,9 +744,10 @@ connectMongo(function(err) {
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
     // Seed default subscriber if not exists
-    db.collection('subscribers').findOne({ code: 'Booksforages1!' }, function(err, existing) {
+    db.collection('subscribers').findOne({ code: 'Booksforages1!' })
+      .then(function(existing) {
       if (!existing) {
-        db.collection('subscribers').insertOne({
+        return db.collection('subscribers').insertOne({
           code: 'Booksforages1!',
           businessName: 'Books for Ages HQ',
           email: 'Codexbrothers@yahoo.com',
@@ -762,10 +766,9 @@ connectMongo(function(err) {
           ebayUserToken: USER_TOKEN,
           createdAt: new Date().toISOString(),
           notes: 'Master admin account'
-        }, function(err) {
-          if (err) console.log('Seed error:', err.message);
-          else console.log('Default subscriber seeded successfully');
-        });
+        })
+        .then(function() { console.log('Default subscriber seeded successfully'); })
+        .catch(function(err) { console.log('Seed error:', err.message); });
       } else {
         console.log('Default subscriber already exists');
       }
