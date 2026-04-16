@@ -45,8 +45,8 @@ function connectMongo(cb) {
 
 // In-memory fallback when MongoDB is not available
 var inMemorySubscribers = {
-  'BFA-ADMIN': {
-    code: 'BFA-ADMIN',
+  'Booksforages1!': {
+    code: 'Booksforages1!',
     businessName: 'Books for Ages HQ',
     email: 'Codexbrothers@yahoo.com',
     active: true,
