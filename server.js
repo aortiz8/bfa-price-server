@@ -731,6 +731,36 @@ connectMongo(function(err) {
     console.log('MongoDB connection FAILED:', JSON.stringify(err));
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
+    // Seed default subscriber if not exists
+    db.collection('subscribers').findOne({ code: 'Booksforages1!' }, function(err, existing) {
+      if (!existing) {
+        db.collection('subscribers').insertOne({
+          code: 'Booksforages1!',
+          businessName: 'Books for Ages HQ',
+          email: 'Codexbrothers@yahoo.com',
+          active: true,
+          isAdmin: true,
+          employees: [
+            { name: 'Adam', pin: '8792' },
+            { name: 'Lizbeth', pin: '7284' },
+            { name: 'Josselin', pin: '9373' },
+            { name: 'Stephanie', pin: '3842' },
+            { name: 'Cris', pin: '8792' }
+          ],
+          ebayClientId: CLIENT_ID,
+          ebayClientSecret: CLIENT_SECRET,
+          ebayDevId: DEV_ID,
+          ebayUserToken: USER_TOKEN,
+          createdAt: new Date().toISOString(),
+          notes: 'Master admin account'
+        }, function(err) {
+          if (err) console.log('Seed error:', err.message);
+          else console.log('Default subscriber seeded successfully');
+        });
+      } else {
+        console.log('Default subscriber already exists');
+      }
+    });
   }
   scheduleDailyReports();
 });
