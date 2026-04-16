@@ -541,10 +541,10 @@ var server = http.createServer(function(req, res) {
 
   // ── Get all subscribers (admin only) ──
   if (pathname === '/admin/subscribers' && req.method === 'GET') {
-    if (!isAdmin) { res.writeHead(403); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
+    if (!isAdmin) { res.writeHead(403, {'Content-Type':'application/json'}); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
     connectMongo(function(err, database) {
       if (err || !database) {
-        res.writeHead(200); res.end(JSON.stringify(Object.values(inMemorySubscribers)));
+        res.writeHead(200, {'Content-Type':'application/json'}); res.end(JSON.stringify(Object.values(inMemorySubscribers)));
         return;
       }
       database.collection('subscribers').find({}).toArray(function(err, subs) {
