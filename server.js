@@ -24,7 +24,11 @@ function connectMongo(cb) {
   if (!MONGODB_URI) { cb('No MongoDB URI configured'); return; }
   try {
     var mongodb = require('mongodb');
-    var client = new mongodb.MongoClient(MONGODB_URI);
+    var client = new mongodb.MongoClient(MONGODB_URI, {
+      serverSelectionTimeoutMS: 10000,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 10000
+    });
     client.connect(function(err) {
       if (err) { console.log('MongoDB connect error:', err.message); cb(err); return; }
       mongoClient = client;
