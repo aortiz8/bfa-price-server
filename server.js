@@ -24,7 +24,7 @@ function connectMongo(cb) {
   if (!MONGODB_URI) { cb('No MongoDB URI configured'); return; }
   try {
     var MongoClient = require('mongodb').MongoClient;
-    MongoClient.connect(MONGODB_URI, { useUnifiedTopology: true }, function(err, client) {
+    MongoClient.connect(MONGODB_URI, function(err, client) {
       if (err) { cb(err); return; }
       mongoClient = client;
       db = client.db('booksforages');
