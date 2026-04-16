@@ -23,15 +23,17 @@ function connectMongo(cb) {
   if (db) { cb(null, db); return; }
   if (!MONGODB_URI) { cb('No MongoDB URI configured'); return; }
   try {
-    var MongoClient = require('mongodb').MongoClient;
-    MongoClient.connect(MONGODB_URI, function(err, client) {
-      if (err) { cb(err); return; }
+    var mongodb = require('mongodb');
+    var client = new mongodb.MongoClient(MONGODB_URI);
+    client.connect(function(err) {
+      if (err) { console.log('MongoDB connect error:', err.message); cb(err); return; }
       mongoClient = client;
       db = client.db('booksforages');
-      console.log('MongoDB connected');
+      console.log('MongoDB connected successfully');
       cb(null, db);
     });
   } catch(e) {
+    console.log('MongoDB error:', e.message);
     cb('MongoDB not available: ' + e.message);
   }
 }
