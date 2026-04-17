@@ -584,6 +584,95 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── eBay Sales API ──
+  if (pathname === '/my/ebay/sales' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var period = parsed.query.period || 'today'; // today, week, month
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var userToken = sub.ebayUserToken || USER_TOKEN;
+
+      // Calculate date range based on period and local timezone
+      var now = new Date();
+      var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+      var startDate;
+      if (period === 'today') {
+        startDate = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()));
+        startDate = new Date(startDate.getTime() + offsetMinutes * 60000);
+      } else if (period === 'week') {
+        var dayOfWeek = localNow.getUTCDay();
+        var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+        var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+        startDate = new Date(monday.getTime() + offsetMinutes * 60000);
+      } else { // month
+        var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
+        startDate = new Date(monthStart.getTime() + offsetMinutes * 60000);
+      }
+
+      // Fetch all orders using pagination
+      var allOrders = [];
+      function fetchOrders(offset) {
+        var path = '/sell/fulfillment/v1/order?filter=creationdate:[' + startDate.toISOString() + '..]&limit=50&offset=' + offset;
+        var opts = {
+          hostname: 'api.ebay.com',
+          path: path,
+          method: 'GET',
+          headers: {
+            'Authorization': 'Bearer ' + userToken,
+            'Content-Type': 'application/json',
+            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+          }
+        };
+        var req2 = https.request(opts, function(r) {
+          var data = '';
+          r.on('data', function(c){ data += c; });
+          r.on('end', function(){
+            try {
+              var json = JSON.parse(data);
+              if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
+              var orders = (json.orders || []).filter(function(o){
+                return o.orderPaymentStatus === 'PAID' && o.cancelStatus.cancelState === 'NONE_REQUESTED';
+              });
+              allOrders = allOrders.concat(orders);
+              var total = json.total || 0;
+              if (allOrders.length < total && json.orders && json.orders.length === 50) {
+                fetchOrders(offset + 50);
+              } else {
+                // Build summary
+                var totalRevenue = allOrders.reduce(function(sum, o){
+                  return sum + parseFloat(o.pricingSummary.priceSubtotal.value);
+                }, 0);
+                var simplifiedOrders = allOrders.map(function(o){
+                  var item = o.lineItems[0] || {};
+                  return {
+                    orderId: o.orderId,
+                    date: o.creationDate,
+                    title: item.title || '',
+                    price: parseFloat(o.pricingSummary.priceSubtotal.value),
+                    paidToSeller: parseFloat(o.paymentSummary.totalDueSeller.value),
+                    status: o.orderFulfillmentStatus,
+                    buyer: o.buyer.username
+                  };
+                });
+                res.writeHead(200); res.end(JSON.stringify({
+                  count: allOrders.length,
+                  totalRevenue: Math.round(totalRevenue * 100) / 100,
+                  orders: simplifiedOrders
+                }));
+              }
+            } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
+          });
+        });
+        req2.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
+        req2.setTimeout(15000, function(){ req2.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
+        req2.end();
+      }
+      fetchOrders(0);
+    });
+    return;
+  }
+
   // ── Test eBay Sales API ──
   if (pathname === '/test-ebay-sales' && req.method === 'GET') {
     var testCode = (parsed.query.code || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
