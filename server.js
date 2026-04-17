@@ -754,6 +754,32 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Subscriber self-service: get monthly listing count ──
+  if (pathname === '/my/listings/month' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ count: 0 })); return; }
+        // Calculate start and end of current local month in UTC
+        var now = new Date();
+        var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+        var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
+        var monthEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 1));
+        var utcStart = new Date(monthStart.getTime() + offsetMinutes * 60000).toISOString();
+        var utcEnd = new Date(monthEnd.getTime() + offsetMinutes * 60000).toISOString();
+        database.collection('listings').countDocuments({
+          subscriberCode: code,
+          createdAt: { $gte: utcStart, $lt: utcEnd }
+        })
+          .then(function(count) { res.writeHead(200); res.end(JSON.stringify({ count: count })); })
+          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ count: 0 })); });
+      });
+    });
+    return;
+  }
+
   // ── Subscriber self-service: update own settings ──
   if (pathname === '/my/settings' && req.method === 'PUT') {
     parseBody(req, function(err, data) {
