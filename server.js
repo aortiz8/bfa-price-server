@@ -120,7 +120,10 @@ function getToken(clientId, clientSecret, cb) {
         if (json.access_token) {
           tokenCache[cacheKey] = { token: json.access_token, expiry: Date.now() + (json.expires_in - 60) * 1000 };
           cb(null, json.access_token);
-        } else { cb('Token error: ' + data); }
+        } else { 
+          console.log('Token error response:', data);
+          cb('Token error: ' + data); 
+        }
       } catch(e) { cb('Token parse error'); }
     });
   });
@@ -478,15 +481,21 @@ var server = http.createServer(function(req, res) {
       var clientSecret = (sub && sub.ebayClientSecret) || CLIENT_SECRET;
 
       getToken(clientId, clientSecret, function(err, token) {
-        if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err, average: null, count: 0 })); return; }
-
+        if (err) { 
+          console.log('Token error:', err);
+          res.writeHead(200); res.end(JSON.stringify({ error: err, average: null, count: 0 })); return; 
+        }
+        console.log('Got token, searching with options:', kwOptions);
         // Try each keyword combination in order, stop when we find results
         var trySearch = function(idx) {
           if (idx >= kwOptions.length) {
+            console.log('All searches exhausted, no results found');
             res.writeHead(200); res.end(JSON.stringify({ average: null, count: 0 }));
             return;
           }
+          console.log('Trying search', idx, ':', kwOptions[idx]);
           searchEbay(kwOptions[idx], conditionId, token, function(result, searchErr) {
+            console.log('Search', idx, 'result:', JSON.stringify(result), 'err:', searchErr);
             if (!searchErr && result && result.average && result.average > 0) {
               res.writeHead(200); res.end(JSON.stringify(result));
             } else {
