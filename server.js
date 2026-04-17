@@ -442,7 +442,10 @@ var server = http.createServer(function(req, res) {
           ebayClientId: sub.ebayClientId || '',
           ebayClientSecret: sub.ebayClientSecret || '',
           ebayDevId: sub.ebayDevId || '',
-          ebayUserToken: sub.ebayUserToken || ''
+          ebayUserToken: sub.ebayUserToken || '',
+          ebayShippingPolicyId: sub.ebayShippingPolicyId || '',
+          ebayPaymentPolicyId: sub.ebayPaymentPolicyId || '',
+          ebayReturnPolicyId: sub.ebayReturnPolicyId || ''
         }));
       });
     });
