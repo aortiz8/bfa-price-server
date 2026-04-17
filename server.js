@@ -161,20 +161,17 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Get subscriber by access code - case-insensitive search
+// Get subscriber by access code
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      var found = null;
-      var codeLower = code.toLowerCase();
-      Object.keys(inMemorySubscribers).forEach(function(k) {
-        if (k.toLowerCase() === codeLower) found = inMemorySubscribers[k];
-      });
-      cb(null, found || null);
+      // Try exact match first, then uppercase
+      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
+      cb(null, sub || null);
       return;
     }
-    var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    database.collection('subscribers').findOne({ code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } })
+    // Try exact match first, then uppercase
+    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
       .then(function(sub) { cb(null, sub); })
       .catch(function(err) { cb(err); });
   });
@@ -270,7 +267,7 @@ function logListing(data, cb) {
 
 var COND_MAP = { '1000': 'NEW', '2750': 'LIKE_NEW', '4000': 'VERY_GOOD', '5000': 'GOOD', '6000': 'ACCEPTABLE' };
 
-function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, cb) {
+function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, shippingPolicyId, paymentPolicyId, returnPolicyId, cb) {
   var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   var pictures = '';
   if (pictureUrls && pictureUrls.length > 0) {
@@ -292,36 +289,36 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     + '<Country>US</Country>'
     + '<Location>United States</Location>'
     + '<Currency>USD</Currency>'
-    + '<Language>' + esc(language || 'English') + '</Language>'
     + '<DispatchTimeMax>3</DispatchTimeMax>'
     + '<ListingDuration>GTC</ListingDuration>'
     + '<ListingType>FixedPriceItem</ListingType>'
     + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
     + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
     + '<SellerProfiles>'
-    + '<SellerShippingProfile><ShippingProfileID>193108528015</ShippingProfileID></SellerShippingProfile>'
-    + '<SellerReturnProfile><ReturnProfileID>129856789015</ReturnProfileID></SellerReturnProfile>'
-    + '<SellerPaymentProfile><PaymentProfileID>226293158015</PaymentProfileID></SellerPaymentProfile>'
+    + '<SellerShippingProfile><ShippingProfileID>' + shippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
+    + '<SellerReturnProfile><ReturnProfileID>' + returnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
+    + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
     + '</SellerProfiles>'
     + '<ItemSpecifics>'
-    + '<NameValueList><Name>Book Title</Name><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><Name>Author</Name><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><Name>Language</Name><Value>' + esc(language || 'English') + '</Value></NameValueList>'
-    + (publisher ? '<NameValueList><Name>Publisher</Name><Value>' + esc(publisher).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (year ? '<NameValueList><Name>Publication Year</Name><Value>' + esc(year) + '</Value></NameValueList>' : '')
-    + (edition ? '<NameValueList><Name>Edition</Name><Value>' + esc(edition).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (format ? '<NameValueList><Name>Format</Name><Value>' + esc(format) + '</Value></NameValueList>' : '')
-    + (signed ? '<NameValueList><Name>Signed</Name><Value>Yes</Value></NameValueList>' : '')
-    + (signedBy ? '<NameValueList><Name>Signed By</Name><Value>' + esc(signedBy).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (inscribed ? '<NameValueList><Name>Inscribed</Name><Value>Yes</Value></NameValueList>' : '')
-    + (illustrator ? '<NameValueList><Name>Illustrator</Name><Value>' + esc(illustrator).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (topic ? '<NameValueList><Name>Topic</Name><Value>' + esc(topic).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (vintage ? '<NameValueList><Name>Vintage</Name><Value>Yes</Value></NameValueList>' : '')
-    + (sku ? '<NameValueList><Name>Custom SKU</Name><Value>' + esc(sku).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (features && features.length > 0 ? (function() { var xml2 = '<NameValueList><Name>Features</Name>'; for (var fi = 0; fi < features.length && fi < 10; fi++) xml2 += '<Value>' + esc(String(features[fi])).substring(0, 65) + '</Value>'; xml2 += '</NameValueList>'; return xml2; })() : '')
-    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<NameValueList><Name>ISBN</Name><Value>' + isbn.replace(/[^0-9X]/gi, '') + '</Value></NameValueList>' : '')
+    + '<NameValueList><n>Book Title</n><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><n>Author</n><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><n>Language</n><Value>' + esc(language || 'English') + '</Value></NameValueList>'
+    + (publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(publisher).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (year ? '<NameValueList><n>Publication Year</n><Value>' + esc(year) + '</Value></NameValueList>' : '')
+    + (edition ? '<NameValueList><n>Edition</n><Value>' + esc(edition).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (format ? '<NameValueList><n>Format</n><Value>' + esc(format) + '</Value></NameValueList>' : '')
+    + (signed ? '<NameValueList><n>Signed</n><Value>Yes</Value></NameValueList>' : '')
+    + (signedBy ? '<NameValueList><n>Signed By</n><Value>' + esc(signedBy).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (inscribed ? '<NameValueList><n>Inscribed</n><Value>Yes</Value></NameValueList>' : '')
+    + (illustrator ? '<NameValueList><n>Illustrator</n><Value>' + esc(illustrator).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (topic ? '<NameValueList><n>Topic</n><Value>' + esc(topic).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (vintage ? '<NameValueList><n>Vintage</n><Value>Yes</Value></NameValueList>' : '')
+    + (sku ? '<NameValueList><n>Custom SKU</n><Value>' + esc(sku).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (features && features.length > 0 ? (function() { var xml2 = '<NameValueList><n>Features</n>'; for (var fi = 0; fi < features.length && fi < 10; fi++) xml2 += '<Value>' + esc(String(features[fi])).substring(0, 65) + '</Value>'; xml2 += '</NameValueList>'; return xml2; })() : '')
+    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<NameValueList><n>ISBN</n><Value>' + isbn.replace(/[^0-9X]/gi, '') + '</Value></NameValueList>' : '')
     + '</ItemSpecifics>'
     + pictures
+    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<ProductListingDetails><ISBN>' + isbn.replace(/[^0-9X]/gi, '') + '</ISBN><IncludeeBayProductDetails>false</IncludeeBayProductDetails></ProductListingDetails>' : '')
     + '</Item>'
     + '</AddItemRequest>';
 
@@ -338,7 +335,6 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log("eBay response:", data.substring(0,500));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) { cb(null, idMatch[1]); }
@@ -497,7 +493,12 @@ var server = http.createServer(function(req, res) {
       getSubscriber(code, function(err, sub) {
         var userToken = (sub && sub.ebayUserToken) || USER_TOKEN;
         var devId = (sub && sub.ebayDevId) || DEV_ID;
-        var price = parseFloat(data.price) || 9.99;
+        var shippingPolicyId = sub && sub.ebayShippingPolicyId;
+        var paymentPolicyId = sub && sub.ebayPaymentPolicyId;
+        var returnPolicyId = sub && sub.ebayReturnPolicyId;
+        if(!shippingPolicyId || !paymentPolicyId || !returnPolicyId){
+          res.writeHead(200); res.end(JSON.stringify({ error: 'eBay business policies not configured. Please add your Shipping, Payment, and Return Policy IDs in your Business Portal.' })); return;
+        }
         var isbn = data.isbn || '';
         var conditionId = parseInt(data.conditionId) || 5000;
         var pictureUrl = data.pictureUrl || '';
@@ -518,7 +519,7 @@ var server = http.createServer(function(req, res) {
         var sku = data.sku || '';
         var features = data.features || [];
 
-        createListing(data.title, data.description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, function(err, listingId) {
+        createListing(data.title, data.description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, shippingPolicyId, paymentPolicyId, returnPolicyId, function(err, listingId) {
           if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
           // Log the listing
           logListing({
@@ -708,7 +709,7 @@ var server = http.createServer(function(req, res) {
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
         // Only allow updating safe fields
-        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken };
+        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
           if (err || !database) {
@@ -765,6 +766,9 @@ connectMongo(function(err) {
           ebayClientSecret: CLIENT_SECRET,
           ebayDevId: DEV_ID,
           ebayUserToken: USER_TOKEN,
+          ebayShippingPolicyId: process.env.EBAY_SHIPPING_POLICY_ID || '193108528015',
+          ebayPaymentPolicyId: process.env.EBAY_PAYMENT_POLICY_ID || '226293158015',
+          ebayReturnPolicyId: process.env.EBAY_RETURN_POLICY_ID || '129856789015',
           notes: 'Master admin account'
         }
       },
