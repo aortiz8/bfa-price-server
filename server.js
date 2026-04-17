@@ -9,7 +9,7 @@ var PORT = process.env.PORT || 3000;
 var CLIENT_ID = process.env.EBAY_CLIENT_ID || 'CodexBro-Booksfor-PRD-66c135696-2728b4d0';
 var CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || 'PRD-6c135696e4a6-8789-475a-8eaf-1662';
 var DEV_ID = process.env.EBAY_DEV_ID || '3e7db631-fffe-4cd8-92b6-6bca13515742';
-var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
+var USER_TOKEN = (process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==').replace(/[\r\n\s]/g,'').trim();
 var ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
 var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
 var MONGODB_URI = (process.env.MONGODB_URI || 'mongodb+srv://booksforagesbookmobile_db_user:nkBsVNFyqDEUGWQv@booksforages.w8exzl5.mongodb.net/booksforages?retryWrites=true&w=majority&appName=booksforages').replace(/[\r\n]/g,'').trim();
@@ -348,6 +348,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
+      console.log('eBay AddItem response:', data.substring(0, 500));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) { cb(null, idMatch[1]); }
@@ -385,8 +386,9 @@ function uploadPicture(base64Image, userToken, devId, cb) {
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
+      console.log('eBay Upload response:', data.substring(0, 300));
       var match = data.match(/<FullURL>(.*?)<\/FullURL>/);
-      if (match) { cb(null, match[1]); } else { cb('Upload failed'); }
+      if (match) { cb(null, match[1]); } else { cb('Upload failed: ' + data.substring(0, 200)); }
     });
   });
   req.on('error', function(e) { cb(e.message); });
@@ -485,6 +487,7 @@ var server = http.createServer(function(req, res) {
 
   // ── Upload photo ──
   if (req.method === 'POST' && pathname === '/upload') {
+    console.log('UPLOAD endpoint hit at', new Date().toISOString());
     parseBody(req, function(err, data) {
       var code = (data.code || 'BFA-ADMIN').toUpperCase();
       getSubscriber(code, function(err, sub) {
@@ -501,7 +504,9 @@ var server = http.createServer(function(req, res) {
 
   // ── List on eBay ──
   if (req.method === 'POST' && pathname === '/list') {
+    console.log('LIST endpoint hit at', new Date().toISOString());
     parseBody(req, function(err, data) {
+      console.log('LIST body parsed, subscriberCode:', data.subscriberCode);
       var code = (data.subscriberCode || 'BFA-ADMIN').toUpperCase();
       getSubscriber(code, function(err, sub) {
         var userToken = (sub && sub.ebayUserToken) || USER_TOKEN;
