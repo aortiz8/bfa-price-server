@@ -501,6 +501,7 @@ var server = http.createServer(function(req, res) {
         var shippingPolicyId = sub && sub.ebayShippingPolicyId;
         var paymentPolicyId = sub && sub.ebayPaymentPolicyId;
         var returnPolicyId = sub && sub.ebayReturnPolicyId;
+        console.log('LIST: code='+code+' shipping='+shippingPolicyId+' payment='+paymentPolicyId+' return='+returnPolicyId);
         if(!shippingPolicyId || !paymentPolicyId || !returnPolicyId){
           res.writeHead(200); res.end(JSON.stringify({ error: 'eBay business policies not configured. Please add your Shipping, Payment, and Return Policy IDs in your Business Portal.' })); return;
         }
