@@ -547,7 +547,7 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/test-subscriber' && req.method === 'GET') {
     var testCode = parsed.query.code || 'Booksforages1!';
     getSubscriber(testCode, function(err, sub) {
-      res.writeHead(200); res.end(JSON.stringify({ found: !!sub, code: testCode, err: err ? err.toString() : null, sub: sub ? { code: sub.code, businessName: sub.businessName, active: sub.active, ebayClientId: sub.ebayClientId, hasToken: !!sub.ebayUserToken } : null }));
+      res.writeHead(200); res.end(JSON.stringify({ found: !!sub, code: testCode, err: err ? err.toString() : null, sub: sub ? { code: sub.code, businessName: sub.businessName, active: sub.active, ebayClientId: sub.ebayClientId, hasToken: !!sub.ebayUserToken, shippingPolicy: sub.ebayShippingPolicyId || 'NOT SET', paymentPolicy: sub.ebayPaymentPolicyId || 'NOT SET', returnPolicy: sub.ebayReturnPolicyId || 'NOT SET' } : null }));
     });
     return;
   }
