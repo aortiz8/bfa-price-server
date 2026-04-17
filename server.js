@@ -161,20 +161,17 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Get subscriber by access code - case-insensitive search
+// Get subscriber by access code
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      var found = null;
-      var codeLower = code.toLowerCase();
-      Object.keys(inMemorySubscribers).forEach(function(k) {
-        if (k.toLowerCase() === codeLower) found = inMemorySubscribers[k];
-      });
-      cb(null, found || null);
+      // Try exact match first, then uppercase
+      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
+      cb(null, sub || null);
       return;
     }
-    var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    database.collection('subscribers').findOne({ code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } })
+    // Try exact match first, then uppercase
+    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
       .then(function(sub) { cb(null, sub); })
       .catch(function(err) { cb(err); });
   });
@@ -297,11 +294,20 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     + '<ListingType>FixedPriceItem</ListingType>'
     + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
     + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
-    + '<SellerProfiles>'
-    + '<SellerShippingProfile><ShippingProfileID>193108528015</ShippingProfileID></SellerShippingProfile>'
-    + '<SellerReturnProfile><ReturnProfileID>129856789015</ReturnProfileID></SellerReturnProfile>'
-    + '<SellerPaymentProfile><PaymentProfileID>226293158015</PaymentProfileID></SellerPaymentProfile>'
-    + '</SellerProfiles>'
+    + '<ShippingDetails>'
+    + '<ShippingServiceOptions>'
+    + '<ShippingServicePriority>1</ShippingServicePriority>'
+    + '<ShippingService>USPSMedia</ShippingService>'
+    + '<ShippingServiceCost>3.99</ShippingServiceCost>'
+    + '<FreeShipping>false</FreeShipping>'
+    + '</ShippingServiceOptions>'
+    + '</ShippingDetails>'
+    + '<ReturnPolicy>'
+    + '<ReturnsAcceptedOption>ReturnsAccepted</ReturnsAcceptedOption>'
+    + '<RefundOption>MoneyBack</RefundOption>'
+    + '<ReturnsWithinOption>Days_30</ReturnsWithinOption>'
+    + '<ShippingCostPaidByOption>Buyer</ShippingCostPaidByOption>'
+    + '</ReturnPolicy>'
     + '<ItemSpecifics>'
     + '<NameValueList><n>Book Title</n><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
     + '<NameValueList><n>Author</n><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
@@ -338,7 +344,6 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log("eBay response:", data.substring(0,500));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) { cb(null, idMatch[1]); }
