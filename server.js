@@ -550,7 +550,45 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // ── Test subscriber lookup ──
+  // ── Test eBay token ──
+  if (pathname === '/test-ebay' && req.method === 'GET') {
+    getSubscriber('Booksforages1!', function(err, sub) {
+      var userToken = (sub && sub.ebayUserToken) || USER_TOKEN;
+      var devId = (sub && sub.ebayDevId) || DEV_ID;
+      // Try a simple eBay API call to verify token works
+      var xml = '<?xml version="1.0" encoding="utf-8"?>'
+        + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+        + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
+        + '</GeteBayOfficialTimeRequest>';
+      var opts = {
+        hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+        headers: {
+          'X-EBAY-API-SITEID': '0', 'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+          'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+          'X-EBAY-API-DEV-NAME': devId,
+          'X-EBAY-API-APP-NAME': CLIENT_ID, 'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
+          'Content-Type': 'text/xml', 'Content-Length': Buffer.byteLength(xml)
+        }
+      };
+      var req = https.request(opts, function(apiRes) {
+        var data = '';
+        apiRes.on('data', function(c) { data += c; });
+        apiRes.on('end', function() {
+          var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
+          var timeMatch = data.match(/<Timestamp>(.*?)<\/Timestamp>/);
+          res.writeHead(200); res.end(JSON.stringify({
+            tokenLength: userToken.length,
+            tokenPreview: userToken.substring(0, 30),
+            ebayResponse: errMatch ? 'ERROR: ' + errMatch[1] : (timeMatch ? 'SUCCESS: ' + timeMatch[1] : data.substring(0, 200))
+          }));
+        });
+      });
+      req.on('error', function(e) { res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      req.setTimeout(15000, function() { req.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+      req.write(xml); req.end();
+    });
+    return;
+  }
   if (pathname === '/test-subscriber' && req.method === 'GET') {
     var testCode = parsed.query.code || 'Booksforages1!';
     getSubscriber(testCode, function(err, sub) {
