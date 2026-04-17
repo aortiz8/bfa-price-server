@@ -251,6 +251,7 @@ function logListing(data, cb) {
   var now = new Date();
   var entry = {
     subscriberCode: (data.subscriberCode || 'BFA-ADMIN').toUpperCase(),
+    businessName: data.businessName || '',
     employee: data.employee || 'Unknown',
     bookTitle: data.bookTitle || data.title || '',
     condition: data.condition || '',
@@ -568,6 +569,7 @@ var server = http.createServer(function(req, res) {
           // Log the listing
           logListing({
             subscriberCode: code,
+            businessName: (sub && sub.businessName) || '',
             employee: data.employee || 'Unknown',
             bookTitle: bookTitle,
             condition: data.conditionLabel || '',
