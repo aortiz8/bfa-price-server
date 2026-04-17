@@ -587,33 +587,46 @@ var server = http.createServer(function(req, res) {
   // ── eBay Sales API ──
   if (pathname === '/my/ebay/sales' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
-    var period = parsed.query.period || 'today'; // today, week, month
+    var period = parsed.query.period || 'today'; // today, week, month, date
     var offsetMinutes = parseInt(parsed.query.offset || '0');
+    var specificDate = parsed.query.date || null; // YYYY-MM-DD for specific date
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayUserToken || USER_TOKEN;
 
-      // Calculate date range based on period and local timezone
+      // Calculate date range
       var now = new Date();
       var localNow = new Date(now.getTime() - offsetMinutes * 60000);
-      var startDate;
-      if (period === 'today') {
+      var startDate, endDate;
+
+      if (specificDate) {
+        // Specific date range
+        var d = new Date(specificDate + 'T00:00:00');
+        startDate = new Date(d.getTime() + offsetMinutes * 60000);
+        endDate = new Date(d.getTime() + offsetMinutes * 60000 + 86400000);
+      } else if (period === 'today') {
         startDate = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()));
         startDate = new Date(startDate.getTime() + offsetMinutes * 60000);
+        endDate = null;
       } else if (period === 'week') {
         var dayOfWeek = localNow.getUTCDay();
         var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
         var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
         startDate = new Date(monday.getTime() + offsetMinutes * 60000);
+        endDate = null;
       } else { // month
         var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
         startDate = new Date(monthStart.getTime() + offsetMinutes * 60000);
+        endDate = null;
       }
+
+      // Build filter
+      var dateFilter = 'creationdate:[' + startDate.toISOString() + '..' + (endDate ? endDate.toISOString() : '') + ']';
 
       // Fetch all orders using pagination
       var allOrders = [];
       function fetchOrders(offset) {
-        var path = '/sell/fulfillment/v1/order?filter=creationdate:[' + startDate.toISOString() + '..]&limit=50&offset=' + offset;
+        var path = '/sell/fulfillment/v1/order?filter=' + encodeURIComponent(dateFilter) + '&limit=50&offset=' + offset;
         var opts = {
           hostname: 'api.ebay.com',
           path: path,
@@ -639,7 +652,6 @@ var server = http.createServer(function(req, res) {
               if (allOrders.length < total && json.orders && json.orders.length === 50) {
                 fetchOrders(offset + 50);
               } else {
-                // Build summary
                 var totalRevenue = allOrders.reduce(function(sum, o){
                   return sum + parseFloat(o.pricingSummary.priceSubtotal.value);
                 }, 0);
