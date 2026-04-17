@@ -584,6 +584,42 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Test eBay Sales API ──
+  if (pathname === '/test-ebay-sales' && req.method === 'GET') {
+    var testCode = (parsed.query.code || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
+    getSubscriber(testCode, function(err, sub) {
+      if (!sub) { res.writeHead(200); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+      var userToken = sub.ebayUserToken || USER_TOKEN;
+      // Call eBay Orders API for today's orders
+      var today = new Date();
+      today.setHours(0,0,0,0);
+      var opts = {
+        hostname: 'api.ebay.com',
+        path: '/sell/fulfillment/v1/order?filter=creationdate:[' + today.toISOString() + '..]&limit=10',
+        method: 'GET',
+        headers: {
+          'Authorization': 'Bearer ' + userToken,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        }
+      };
+      var req2 = https.request(opts, function(r) {
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          try {
+            var json = JSON.parse(data);
+            res.writeHead(200); res.end(JSON.stringify({ status: r.statusCode, response: json }));
+          } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', raw: data.substring(0,500) })); }
+        });
+      });
+      req2.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      req2.setTimeout(10000, function(){ req2.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+      req2.end();
+    });
+    return;
+  }
+
   // ── Test subscriber lookup ──
   if (pathname === '/test-subscriber' && req.method === 'GET') {
     var testCode = parsed.query.code || 'Booksforages1!';
