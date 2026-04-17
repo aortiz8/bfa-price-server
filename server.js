@@ -130,7 +130,9 @@ function getToken(clientId, clientSecret, cb) {
 }
 
 function searchEbay(keywords, conditionId, token, cb) {
-  var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
+  var condFilter = '';
+  if (conditionId === 'NEW') condFilter = ',conditions:{NEW}';
+  else if (conditionId === 'USED') condFilter = ',conditions:{USED}';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
   var opts = {
@@ -453,24 +455,48 @@ var server = http.createServer(function(req, res) {
     var isbn = (parsed.query.isbn || '').replace(/[^0-9X]/gi, '');
     var year = parsed.query.year || '';
     var publisher = parsed.query.publisher || '';
-    var cond = parsed.query.condition || '3000';
+    var cond = parsed.query.condition || '5000';
     var signed = parsed.query.signed === '1';
-    var conditionId = COND_MAP[cond] || 'GOOD';
     var code = (parsed.query.code || 'BFA-ADMIN').toUpperCase();
+
+    // Simplified condition: New=1000, everything else=Used (3000)
+    var conditionId = (cond === '1000') ? 'NEW' : 'USED';
+
+    // 3 keyword combinations to try in order
+    var kwOptions = [
+      [title, author, year, publisher].filter(Boolean).join(' '),
+      [title, author, year].filter(Boolean).join(' '),
+      [title, author].filter(Boolean).join(' ')
+    ].filter(function(k){ return k.trim().length > 0; });
+
+    if(isbn) kwOptions.unshift(isbn); // if ISBN, try it first
+
+    if(signed) kwOptions = kwOptions.map(function(k){ return k + ' signed'; });
+
+    if (!kwOptions.length) { res.writeHead(400); res.end(JSON.stringify({ error: 'missing search terms' })); return; }
 
     getSubscriber(code, function(err, sub) {
       var clientId = (sub && sub.ebayClientId) || CLIENT_ID;
       var clientSecret = (sub && sub.ebayClientSecret) || CLIENT_SECRET;
 
-      var kwParts = [title, author, year, publisher].filter(Boolean);
-      var kw = isbn ? isbn : (kwParts.join(' ') + (signed ? ' signed' : ''));
-      if (!kw) { res.writeHead(400); res.end(JSON.stringify({ error: 'missing search terms' })); return; }
-
       getToken(clientId, clientSecret, function(err, token) {
         if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err, average: null, count: 0 })); return; }
-        searchEbay(kw, conditionId, token, function(result, searchErr) {
-          res.writeHead(200); res.end(JSON.stringify(searchErr ? { error: searchErr, average: null, count: 0 } : result));
-        });
+
+        // Try each keyword combination in order, stop when we find results
+        var trySearch = function(idx) {
+          if (idx >= kwOptions.length) {
+            res.writeHead(200); res.end(JSON.stringify({ average: null, count: 0 }));
+            return;
+          }
+          searchEbay(kwOptions[idx], conditionId, token, function(result, searchErr) {
+            if (!searchErr && result && result.average && result.average > 0) {
+              res.writeHead(200); res.end(JSON.stringify(result));
+            } else {
+              trySearch(idx + 1);
+            }
+          });
+        };
+        trySearch(0);
       });
     });
     return;
