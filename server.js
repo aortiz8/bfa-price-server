@@ -165,13 +165,18 @@ function esc(s) {
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      // Try exact match first, then uppercase
-      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
-      cb(null, sub || null);
+      // Case-insensitive search in memory
+      var found = null;
+      var codeLower = code.toLowerCase();
+      Object.keys(inMemorySubscribers).forEach(function(k) {
+        if (k.toLowerCase() === codeLower) found = inMemorySubscribers[k];
+      });
+      cb(null, found || null);
       return;
     }
-    // Try exact match first, then uppercase
-    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
+    // Case-insensitive search in MongoDB using regex
+    var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    database.collection('subscribers').findOne({ code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } })
       .then(function(sub) { cb(null, sub); })
       .catch(function(err) { cb(err); });
   });
