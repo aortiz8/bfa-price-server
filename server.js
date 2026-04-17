@@ -711,6 +711,7 @@ var server = http.createServer(function(req, res) {
     if (!isAdmin) { res.writeHead(403); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
     var dateFilter = parsed.query.date || new Date().toISOString().split('T')[0];
     var subFilter = parsed.query.code || null;
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
     connectMongo(function(err, database) {
       if (err || !database) {
         var filtered = inMemoryListings.filter(function(l) {
@@ -719,7 +720,10 @@ var server = http.createServer(function(req, res) {
         res.writeHead(200); res.end(JSON.stringify(filtered));
         return;
       }
-      var query = { date: dateFilter };
+      var localMidnight = new Date(dateFilter + 'T00:00:00');
+      var utcStart = new Date(localMidnight.getTime() + offsetMinutes * 60000).toISOString();
+      var utcEnd = new Date(localMidnight.getTime() + offsetMinutes * 60000 + 86400000).toISOString();
+      var query = { createdAt: { $gte: utcStart, $lt: utcEnd } };
       if (subFilter) query.subscriberCode = subFilter.toUpperCase();
       database.collection('listings').find(query).sort({ createdAt: -1 }).toArray()
         .then(function(listings) { res.writeHead(200); res.end(JSON.stringify(listings)); })
