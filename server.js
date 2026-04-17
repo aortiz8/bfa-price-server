@@ -132,7 +132,7 @@ function getToken(clientId, clientSecret, cb) {
 function searchEbay(keywords, conditionId, token, cb) {
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
-    + '&category_ids=267&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
+    + '&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
   var opts = {
     hostname: 'api.ebay.com', path: query, method: 'GET',
     headers: { 'Authorization': 'Bearer ' + token, 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }
