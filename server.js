@@ -135,7 +135,7 @@ function getToken(clientId, clientSecret, cb) {
 function searchEbay(keywords, conditionId, token, cb) {
   var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
-    + '&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
+    + '&category_ids=267&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
   var opts = {
     hostname: 'api.ebay.com', path: query, method: 'GET',
     headers: { 'Authorization': 'Bearer ' + token, 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }
@@ -494,7 +494,7 @@ var server = http.createServer(function(req, res) {
             return;
           }
           console.log('Trying search', idx, ':', kwOptions[idx]);
-          searchEbay(kwOptions[idx], conditionId, token, function(result, searchErr) {
+          searchEbay(kwOptions[idx], conditionId, token, function(searchErr, result) {
             console.log('Search', idx, 'result:', JSON.stringify(result), 'err:', searchErr);
             if (!searchErr && result && result.average && result.average > 0) {
               res.writeHead(200); res.end(JSON.stringify(result));
