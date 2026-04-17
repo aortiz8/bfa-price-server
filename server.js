@@ -730,6 +730,7 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/my/listings' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var dateFilter = parsed.query.date || new Date().toISOString().split('T')[0];
+    var offsetMinutes = parseInt(parsed.query.offset || '0'); // browser timezone offset in minutes
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       connectMongo(function(err, database) {
@@ -738,7 +739,14 @@ var server = http.createServer(function(req, res) {
           res.writeHead(200); res.end(JSON.stringify(filtered));
           return;
         }
-        database.collection('listings').find({ subscriberCode: code, date: dateFilter }).sort({ createdAt: -1 }).toArray()
+        // Calculate UTC start and end times for the local date
+        var localMidnight = new Date(dateFilter + 'T00:00:00');
+        var utcStart = new Date(localMidnight.getTime() + offsetMinutes * 60000).toISOString();
+        var utcEnd = new Date(localMidnight.getTime() + offsetMinutes * 60000 + 86400000).toISOString();
+        database.collection('listings').find({
+          subscriberCode: code,
+          createdAt: { $gte: utcStart, $lt: utcEnd }
+        }).sort({ createdAt: -1 }).toArray()
           .then(function(listings) { res.writeHead(200); res.end(JSON.stringify(listings)); })
           .catch(function() { res.writeHead(200); res.end('[]'); });
       });
