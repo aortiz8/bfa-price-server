@@ -305,25 +305,25 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
     + '</SellerProfiles>'
     + '<ItemSpecifics>'
-    + '<NameValueList><n>Book Title</n><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><n>Author</n><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
-    + '<NameValueList><n>Language</n><Value>' + esc(language || 'English') + '</Value></NameValueList>'
-    + (publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(publisher).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (year ? '<NameValueList><n>Publication Year</n><Value>' + esc(year) + '</Value></NameValueList>' : '')
-    + (edition ? '<NameValueList><n>Edition</n><Value>' + esc(edition).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (format ? '<NameValueList><n>Format</n><Value>' + esc(format) + '</Value></NameValueList>' : '')
-    + (signed ? '<NameValueList><n>Signed</n><Value>Yes</Value></NameValueList>' : '')
-    + (signedBy ? '<NameValueList><n>Signed By</n><Value>' + esc(signedBy).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (inscribed ? '<NameValueList><n>Inscribed</n><Value>Yes</Value></NameValueList>' : '')
-    + (illustrator ? '<NameValueList><n>Illustrator</n><Value>' + esc(illustrator).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (topic ? '<NameValueList><n>Topic</n><Value>' + esc(topic).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (vintage ? '<NameValueList><n>Vintage</n><Value>Yes</Value></NameValueList>' : '')
-    + (sku ? '<NameValueList><n>Custom SKU</n><Value>' + esc(sku).substring(0, 65) + '</Value></NameValueList>' : '')
-    + (features && features.length > 0 ? (function() { var xml2 = '<NameValueList><n>Features</n>'; for (var fi = 0; fi < features.length && fi < 10; fi++) xml2 += '<Value>' + esc(String(features[fi])).substring(0, 65) + '</Value>'; xml2 += '</NameValueList>'; return xml2; })() : '')
-    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<NameValueList><n>ISBN</n><Value>' + isbn.replace(/[^0-9X]/gi, '') + '</Value></NameValueList>' : '')
+    + '<NameValueList><Name>Book Title</Name><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Author</Name><Value>' + esc(author || 'Unknown').substring(0, 65) + '</Value></NameValueList>'
+    + '<NameValueList><Name>Language</Name><Value>' + esc(language || 'English') + '</Value></NameValueList>'
+    + (publisher ? '<NameValueList><Name>Publisher</Name><Value>' + esc(publisher).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (year ? '<NameValueList><Name>Publication Year</Name><Value>' + esc(year) + '</Value></NameValueList>' : '')
+    + (edition ? '<NameValueList><Name>Edition</Name><Value>' + esc(edition).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (format ? '<NameValueList><Name>Format</Name><Value>' + esc(format) + '</Value></NameValueList>' : '')
+    + (signed ? '<NameValueList><Name>Signed</Name><Value>Yes</Value></NameValueList>' : '')
+    + (signedBy ? '<NameValueList><Name>Signed By</Name><Value>' + esc(signedBy).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (inscribed ? '<NameValueList><Name>Inscribed</Name><Value>Yes</Value></NameValueList>' : '')
+    + (illustrator ? '<NameValueList><Name>Illustrator</Name><Value>' + esc(illustrator).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (topic ? '<NameValueList><Name>Topic</Name><Value>' + esc(topic).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (vintage ? '<NameValueList><Name>Vintage</Name><Value>Yes</Value></NameValueList>' : '')
+    + (sku ? '<NameValueList><Name>Custom SKU</Name><Value>' + esc(sku).substring(0, 65) + '</Value></NameValueList>' : '')
+    + (features && features.length > 0 ? (function() { var xml2 = '<NameValueList><Name>Features</Name>'; for (var fi = 0; fi < features.length && fi < 10; fi++) xml2 += '<Value>' + esc(String(features[fi])).substring(0, 65) + '</Value>'; xml2 += '</NameValueList>'; return xml2; })() : '')
+    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<NameValueList><Name>ISBN</Name><Value>' + isbn.replace(/[^0-9X]/gi, '') + '</Value></NameValueList>' : '')
     + '</ItemSpecifics>'
     + pictures
-    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<ProductListingDetails><ISBN>' + isbn.replace(/[^0-9X]/gi, '') + '</ISBN><IncludeeBayProductDetails>false</IncludeeBayProductDetails></ProductListingDetails>' : '')
+    + (isbn && (isbn.replace(/[^0-9]/g, '').substring(0, 3) === '978' || isbn.replace(/[^0-9]/g, '').substring(0, 3) === '979') ? '<ProductListingDetails><ISBN>' + isbn.replace(/[^0-9X]/gi, '') + '</ISBN><IncludeeBayProductDetails>false</IncludeeBayProductDetails><UseStockPhotoURLAsGallery>false</UseStockPhotoURLAsGallery></ProductListingDetails>' : '')
     + '</Item>'
     + '</AddItemRequest>';
 
@@ -342,6 +342,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     res.on('end', function() {
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
+      console.log('eBay response:', data.substring(0, 500));
       if (idMatch) { cb(null, idMatch[1]); }
       else { cb(errMatch ? errMatch[1] : 'Unknown eBay error'); }
     });
