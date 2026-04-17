@@ -300,7 +300,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     + '<SellerProfiles>'
     + '<SellerShippingProfile><ShippingProfileID>193108528015</ShippingProfileID></SellerShippingProfile>'
     + '<SellerReturnProfile><ReturnProfileID>129856789015</ReturnProfileID></SellerReturnProfile>'
-    + '<SellerPaymentProfile><PaymentProfileID>107530320015</PaymentProfileID></SellerPaymentProfile>'
+    + '<SellerPaymentProfile><PaymentProfileID>226293158015</PaymentProfileID></SellerPaymentProfile>'
     + '</SellerProfiles>'
     + '<ItemSpecifics>'
     + '<NameValueList><n>Book Title</n><Value>' + esc(bookTitle || title).substring(0, 65) + '</Value></NameValueList>'
