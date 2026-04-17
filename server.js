@@ -745,11 +745,11 @@ connectMongo(function(err) {
     console.log('MongoDB connection FAILED:', JSON.stringify(err));
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
-    // Seed default subscriber if not exists
-    // Always upsert default subscriber with latest eBay credentials
+    // Always update token and core fields, but never overwrite policy IDs if already set
     db.collection('subscribers').updateOne(
       { code: 'Booksforages1!' },
-      { $set: {
+      {
+        $set: {
           code: 'Booksforages1!',
           businessName: 'Books for Ages HQ',
           email: 'Codexbrothers@yahoo.com',
@@ -766,10 +766,12 @@ connectMongo(function(err) {
           ebayClientSecret: CLIENT_SECRET,
           ebayDevId: DEV_ID,
           ebayUserToken: USER_TOKEN,
+          notes: 'Master admin account'
+        },
+        $setOnInsert: {
           ebayShippingPolicyId: process.env.EBAY_SHIPPING_POLICY_ID || '193108528015',
           ebayPaymentPolicyId: process.env.EBAY_PAYMENT_POLICY_ID || '226293158015',
-          ebayReturnPolicyId: process.env.EBAY_RETURN_POLICY_ID || '129856789015',
-          notes: 'Master admin account'
+          ebayReturnPolicyId: process.env.EBAY_RETURN_POLICY_ID || '129856789015'
         }
       },
       { upsert: true }
