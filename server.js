@@ -506,6 +506,7 @@ var server = http.createServer(function(req, res) {
           res.writeHead(200); res.end(JSON.stringify({ error: 'eBay business policies not configured. Please add your Shipping, Payment, and Return Policy IDs in your Business Portal.' })); return;
         }
         var isbn = data.isbn || '';
+        var price = parseFloat(data.price) || 9.99;
         var conditionId = parseInt(data.conditionId) || 5000;
         var pictureUrl = data.pictureUrl || '';
         var pictureUrls = data.pictureUrls || (pictureUrl ? [pictureUrl] : []);
