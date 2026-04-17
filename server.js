@@ -786,6 +786,60 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Subscriber: get this week's listings (for leaderboard + revenue) ──
+  if (pathname === '/my/listings/week' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ listings: [], weekLabel: 'This Week' })); return; }
+        // Find Monday of current week in subscriber's local time
+        var now = new Date();
+        var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+        var dayOfWeek = localNow.getUTCDay(); // 0=Sun, 1=Mon...
+        var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+        var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+        var nextMonday = new Date(monday.getTime() + 7 * 86400000);
+        var utcStart = new Date(monday.getTime() + offsetMinutes * 60000).toISOString();
+        var utcEnd = new Date(nextMonday.getTime() + offsetMinutes * 60000).toISOString();
+        var weekLabel = 'Week of ' + monday.toISOString().split('T')[0] + ' – ' + new Date(nextMonday - 86400000).toISOString().split('T')[0];
+        database.collection('listings').find({
+          subscriberCode: code,
+          createdAt: { $gte: utcStart, $lt: utcEnd }
+        }).sort({ createdAt: -1 }).toArray()
+          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify({ listings: listings, weekLabel: weekLabel })); })
+          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [], weekLabel: weekLabel })); });
+      });
+    });
+    return;
+  }
+
+  // ── Subscriber: get this month's full listings (for revenue) ──
+  if (pathname === '/my/listings/month-full' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ listings: [] })); return; }
+        var now = new Date();
+        var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+        var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
+        var monthEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 1));
+        var utcStart = new Date(monthStart.getTime() + offsetMinutes * 60000).toISOString();
+        var utcEnd = new Date(monthEnd.getTime() + offsetMinutes * 60000).toISOString();
+        database.collection('listings').find({
+          subscriberCode: code,
+          createdAt: { $gte: utcStart, $lt: utcEnd }
+        }).toArray()
+          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify({ listings: listings })); })
+          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [] })); });
+      });
+    });
+    return;
+  }
+
   // ── Subscriber self-service: update own settings ──
   if (pathname === '/my/settings' && req.method === 'PUT') {
     parseBody(req, function(err, data) {
