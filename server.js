@@ -130,9 +130,7 @@ function getToken(clientId, clientSecret, cb) {
 }
 
 function searchEbay(keywords, conditionId, token, cb) {
-  var condFilter = '';
-  if (conditionId === 'NEW') condFilter = ',conditions:{NEW}';
-  else if (conditionId === 'USED') condFilter = ',conditions:{USED}';
+  var condFilter = conditionId ? ',conditions:{' + conditionId + '}' : '';
   var query = '/buy/browse/v1/item_summary/search?q=' + encodeURIComponent(keywords)
     + '&category_ids=267&filter=buyingOptions:{FIXED_PRICE}' + condFilter + '&limit=20&sort=price';
   var opts = {
@@ -459,8 +457,8 @@ var server = http.createServer(function(req, res) {
     var signed = parsed.query.signed === '1';
     var code = (parsed.query.code || 'BFA-ADMIN').toUpperCase();
 
-    // Simplified condition: New=1000, everything else=Used (3000)
-    var conditionId = (cond === '1000') ? 'NEW' : 'USED';
+    // Condition filter: only filter for NEW, otherwise search all conditions
+    var conditionId = (cond === '1000') ? 'NEW' : '';
 
     // 3 keyword combinations to try in order
     var kwOptions = [
