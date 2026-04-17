@@ -9,7 +9,7 @@ var PORT = process.env.PORT || 3000;
 var CLIENT_ID = process.env.EBAY_CLIENT_ID || 'CodexBro-Booksfor-PRD-66c135696-2728b4d0';
 var CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || 'PRD-6c135696e4a6-8789-475a-8eaf-1662';
 var DEV_ID = process.env.EBAY_DEV_ID || '3e7db631-fffe-4cd8-92b6-6bca13515742';
-var USER_TOKEN = (process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==').replace(/[\r\n\s]/g,'').trim();
+var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 var ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
 var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
 var MONGODB_URI = (process.env.MONGODB_URI || 'mongodb+srv://booksforagesbookmobile_db_user:nkBsVNFyqDEUGWQv@booksforages.w8exzl5.mongodb.net/booksforages?retryWrites=true&w=majority&appName=booksforages').replace(/[\r\n]/g,'').trim();
@@ -161,22 +161,17 @@ function esc(s) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// Get subscriber by access code - case-insensitive search
+// Get subscriber by access code
 function getSubscriber(code, cb) {
   connectMongo(function(err, database) {
     if (err || !database) {
-      // Case-insensitive search in memory
-      var found = null;
-      var codeLower = code.toLowerCase();
-      Object.keys(inMemorySubscribers).forEach(function(k) {
-        if (k.toLowerCase() === codeLower) found = inMemorySubscribers[k];
-      });
-      cb(null, found || null);
+      // Try exact match first, then uppercase
+      var sub = inMemorySubscribers[code] || inMemorySubscribers[code.toUpperCase()];
+      cb(null, sub || null);
       return;
     }
-    // Case-insensitive search in MongoDB using regex
-    var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    database.collection('subscribers').findOne({ code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } })
+    // Try exact match first, then uppercase
+    database.collection('subscribers').findOne({ $or: [{ code: code }, { code: code.toUpperCase() }] })
       .then(function(sub) { cb(null, sub); })
       .catch(function(err) { cb(err); });
   });
@@ -348,7 +343,7 @@ function createListing(title, description, price, isbn, conditionId, pictureUrls
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay AddItem response:', data.substring(0, 500));
+      console.log("eBay response:", data.substring(0,500));
       var idMatch = data.match(/<ItemID>(\d+)<\/ItemID>/);
       var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
       if (idMatch) { cb(null, idMatch[1]); }
@@ -386,9 +381,8 @@ function uploadPicture(base64Image, userToken, devId, cb) {
     var data = '';
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
-      console.log('eBay Upload response:', data.substring(0, 300));
       var match = data.match(/<FullURL>(.*?)<\/FullURL>/);
-      if (match) { cb(null, match[1]); } else { cb('Upload failed: ' + data.substring(0, 200)); }
+      if (match) { cb(null, match[1]); } else { cb('Upload failed'); }
     });
   });
   req.on('error', function(e) { cb(e.message); });
@@ -487,7 +481,6 @@ var server = http.createServer(function(req, res) {
 
   // ── Upload photo ──
   if (req.method === 'POST' && pathname === '/upload') {
-    console.log('UPLOAD endpoint hit at', new Date().toISOString());
     parseBody(req, function(err, data) {
       var code = (data.code || 'BFA-ADMIN').toUpperCase();
       getSubscriber(code, function(err, sub) {
@@ -504,9 +497,7 @@ var server = http.createServer(function(req, res) {
 
   // ── List on eBay ──
   if (req.method === 'POST' && pathname === '/list') {
-    console.log('LIST endpoint hit at', new Date().toISOString());
     parseBody(req, function(err, data) {
-      console.log('LIST body parsed, subscriberCode:', data.subscriberCode);
       var code = (data.subscriberCode || 'BFA-ADMIN').toUpperCase();
       getSubscriber(code, function(err, sub) {
         var userToken = (sub && sub.ebayUserToken) || USER_TOKEN;
@@ -534,6 +525,7 @@ var server = http.createServer(function(req, res) {
 
         createListing(data.title, data.description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, function(err, listingId) {
           if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+          // Log the listing
           logListing({
             subscriberCode: code,
             employee: data.employee || 'Unknown',
@@ -550,62 +542,11 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // ── Test eBay token ──
-  if (pathname === '/test-ebay' && req.method === 'GET') {
-    getSubscriber('Booksforages1!', function(err, sub) {
-      var userToken = (sub && sub.ebayUserToken) || USER_TOKEN;
-      var devId = (sub && sub.ebayDevId) || DEV_ID;
-      // Try a simple eBay API call to verify token works
-      var xml = '<?xml version="1.0" encoding="utf-8"?>'
-        + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-        + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
-        + '</GeteBayOfficialTimeRequest>';
-      var opts = {
-        hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-        headers: {
-          'X-EBAY-API-SITEID': '0', 'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-          'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
-          'X-EBAY-API-DEV-NAME': devId,
-          'X-EBAY-API-APP-NAME': CLIENT_ID, 'X-EBAY-API-CERT-NAME': CLIENT_SECRET,
-          'Content-Type': 'text/xml', 'Content-Length': Buffer.byteLength(xml)
-        }
-      };
-      var req = https.request(opts, function(apiRes) {
-        var data = '';
-        apiRes.on('data', function(c) { data += c; });
-        apiRes.on('end', function() {
-          var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
-          var timeMatch = data.match(/<Timestamp>(.*?)<\/Timestamp>/);
-          res.writeHead(200); res.end(JSON.stringify({
-            tokenLength: userToken.length,
-            tokenPreview: userToken.substring(0, 30),
-            ebayResponse: errMatch ? 'ERROR: ' + errMatch[1] : (timeMatch ? 'SUCCESS: ' + timeMatch[1] : data.substring(0, 200))
-          }));
-        });
-      });
-      req.on('error', function(e) { res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-      req.setTimeout(15000, function() { req.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
-      req.write(xml); req.end();
-    });
-    return;
-  }
+  // ── Test subscriber lookup ──
   if (pathname === '/test-subscriber' && req.method === 'GET') {
     var testCode = parsed.query.code || 'Booksforages1!';
     getSubscriber(testCode, function(err, sub) {
-      res.writeHead(200); res.end(JSON.stringify({ 
-        found: !!sub, 
-        code: testCode, 
-        err: err ? err.toString() : null, 
-        sub: sub ? { 
-          code: sub.code, 
-          businessName: sub.businessName, 
-          active: sub.active, 
-          ebayClientId: sub.ebayClientId, 
-          hasToken: !!sub.ebayUserToken,
-          tokenPreview: sub.ebayUserToken ? sub.ebayUserToken.substring(0, 50) : 'EMPTY',
-          tokenLength: sub.ebayUserToken ? sub.ebayUserToken.length : 0
-        } : null 
-      }));
+      res.writeHead(200); res.end(JSON.stringify({ found: !!sub, code: testCode, err: err ? err.toString() : null, sub: sub ? { code: sub.code, businessName: sub.businessName, active: sub.active, ebayClientId: sub.ebayClientId, hasToken: !!sub.ebayUserToken } : null }));
     });
     return;
   }
@@ -771,6 +712,7 @@ var server = http.createServer(function(req, res) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        // Only allow updating safe fields
         var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
@@ -779,8 +721,7 @@ var server = http.createServer(function(req, res) {
             res.writeHead(200); res.end(JSON.stringify({ success: true }));
             return;
           }
-          // Use sub.code (actual stored code) not incoming code to avoid case mismatch
-          database.collection('subscribers').updateOne({ code: sub.code }, { $set: allowed })
+          database.collection('subscribers').updateOne({ code: code }, { $set: allowed })
             .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
             .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
         });
@@ -808,6 +749,8 @@ connectMongo(function(err) {
     console.log('MongoDB connection FAILED:', JSON.stringify(err));
   } else {
     console.log('MongoDB connection SUCCESS - db ready');
+    // Seed default subscriber if not exists
+    // Always upsert default subscriber with latest eBay credentials
     db.collection('subscribers').updateOne(
       { code: 'Booksforages1!' },
       { $set: {
