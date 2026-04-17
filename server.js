@@ -854,7 +854,22 @@ connectMongo(function(err) {
       },
       { upsert: true }
     )
-    .then(function() { console.log('Default subscriber upserted successfully'); })
+    .then(function() { 
+      console.log('Default subscriber upserted successfully');
+      // Migrate old listings - backfill businessName where missing
+      db.collection('subscribers').find({}).toArray()
+        .then(function(subs) {
+          subs.forEach(function(sub) {
+            db.collection('listings').updateMany(
+              { subscriberCode: sub.code.toUpperCase(), businessName: { $in: [null, '', undefined] } },
+              { $set: { businessName: sub.businessName || sub.code } }
+            )
+            .then(function(r) { if(r.modifiedCount > 0) console.log('Backfilled businessName for', r.modifiedCount, 'listings of', sub.businessName); })
+            .catch(function(e) { console.log('Backfill error:', e.message); });
+          });
+        })
+        .catch(function(e) { console.log('Migration error:', e.message); });
+    })
     .catch(function(err) { console.log('Seed error:', err.message); });
   }
   scheduleDailyReports();
