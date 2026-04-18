@@ -890,6 +890,19 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Timeclock: Debug punches ──
+  if (pathname === '/tc/debug' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var name = parsed.query.name || '';
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+      database.collection('timeclock').find({ subscriberCode: code, employeeName: name }).sort({ createdAt: -1 }).limit(20).toArray()
+      .then(function(punches){ res.writeHead(200); res.end(JSON.stringify({ count: punches.length, punches: punches })); })
+      .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+    });
+    return;
+  }
+
   // ── Timeclock: Get QR token ──
   if (pathname === '/tc/qr' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
