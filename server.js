@@ -703,6 +703,8 @@ var server = http.createServer(function(req, res) {
       + '&redirect_uri=' + encodeURIComponent(RUNAME)
       + '&scope=' + encodeURIComponent(scopes)
       + '&state=' + encodeURIComponent(code);
+    console.log('eBay OAuth start for code:', code);
+    console.log('Redirect URL:', authUrl);
     res.writeHead(302, { 'Location': authUrl });
     res.end();
     return;
@@ -712,6 +714,7 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/ebay/callback' && req.method === 'GET') {
     var authCode = parsed.query.code || '';
     var subscriberCode = (parsed.query.state || '').toUpperCase();
+    console.log('eBay callback received. authCode length:', authCode.length, 'subscriberCode:', subscriberCode);
     if (!authCode) {
       res.writeHead(200); res.end('<html><body><h2>❌ eBay connection failed. Please try again.</h2></body></html>');
       return;
@@ -734,6 +737,7 @@ var server = http.createServer(function(req, res) {
         try {
           var json = JSON.parse(data);
           if (!json.access_token) {
+            console.log('eBay token exchange failed:', data);
             res.writeHead(200); res.end('<html><body><h2>❌ Failed to get token: ' + data + '</h2></body></html>');
             return;
           }
