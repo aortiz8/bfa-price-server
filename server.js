@@ -1040,11 +1040,13 @@ connectMongo(function(err) {
           ebayClientId: CLIENT_ID,
           ebayClientSecret: CLIENT_SECRET,
           ebayDevId: DEV_ID,
-          ebayUserToken: USER_TOKEN,
           ebayShippingPolicyId: process.env.EBAY_SHIPPING_POLICY_ID || '193108528015',
           ebayPaymentPolicyId: process.env.EBAY_PAYMENT_POLICY_ID || '226293158015',
           ebayReturnPolicyId: process.env.EBAY_RETURN_POLICY_ID || '129856789015',
           notes: 'Master admin account'
+        },
+        $setOnInsert: {
+          ebayUserToken: USER_TOKEN
         }
       },
       { upsert: true }
