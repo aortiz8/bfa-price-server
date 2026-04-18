@@ -444,6 +444,7 @@ var server = http.createServer(function(req, res) {
           ebayClientSecret: sub.ebayClientSecret || '',
           ebayDevId: sub.ebayDevId || '',
           ebayUserToken: sub.ebayUserToken || '',
+          ebayOAuthToken: sub.ebayOAuthToken || '',
           ebayShippingPolicyId: sub.ebayShippingPolicyId || '',
           ebayPaymentPolicyId: sub.ebayPaymentPolicyId || '',
           ebayReturnPolicyId: sub.ebayReturnPolicyId || ''
@@ -592,7 +593,7 @@ var server = http.createServer(function(req, res) {
     var specificDate = parsed.query.date || null; // YYYY-MM-DD for specific date
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-      var userToken = sub.ebayUserToken || USER_TOKEN;
+      var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
 
       // Calculate date range
       var now = new Date();
@@ -984,7 +985,7 @@ var server = http.createServer(function(req, res) {
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
         // Only allow updating safe fields
-        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId };
+        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
           if (err || !database) {
