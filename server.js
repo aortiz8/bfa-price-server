@@ -890,6 +890,24 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Timeclock: Clear punches (admin only) ──
+  if (pathname === '/tc/clear' && req.method === 'GET') {
+    if (!isAdmin) { res.writeHead(403); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
+    var code = (parsed.query.code || '').toUpperCase();
+    var name = parsed.query.name || '';
+    var date = parsed.query.date || '';
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+      var query = { subscriberCode: code };
+      if (name) query.employeeName = name;
+      if (date) query.localDate = date;
+      database.collection('timeclock').deleteMany(query)
+      .then(function(r){ res.writeHead(200); res.end(JSON.stringify({ deleted: r.deletedCount })); })
+      .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+    });
+    return;
+  }
+
   // ── Timeclock: Debug punches ──
   if (pathname === '/tc/debug' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
