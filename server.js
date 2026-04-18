@@ -205,6 +205,53 @@ function sendEmail(to, subject, html, cb) {
   req.write(body); req.end();
 }
 
+// ── eBay OAuth Auto-Refresh (every 110 minutes) ──
+function refreshAllEbayTokens() {
+  connectMongo(function(err, database) {
+    if (err || !database) return;
+    database.collection('subscribers').find({ ebayRefreshToken: { $exists: true, $ne: '' } }).toArray()
+    .then(function(subs) {
+      subs.forEach(function(sub) {
+        if (!sub.ebayRefreshToken) return;
+        var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
+        var body = 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(sub.ebayRefreshToken);
+        var opts = {
+          hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Authorization': 'Basic ' + credentials,
+            'Content-Length': Buffer.byteLength(body)
+          }
+        };
+        var req2 = https.request(opts, function(r) {
+          var data = '';
+          r.on('data', function(c){ data += c; });
+          r.on('end', function(){
+            try {
+              var json = JSON.parse(data);
+              if (json.access_token) {
+                database.collection('subscribers').updateOne(
+                  { code: sub.code },
+                  { $set: { ebayOAuthToken: json.access_token, ebayOAuthExpiry: new Date(Date.now() + (json.expires_in || 7200) * 1000).toISOString() } }
+                ).then(function(){ console.log('eBay token refreshed for:', sub.code); })
+                .catch(function(e){ console.log('Token save error:', e.message); });
+              } else {
+                console.log('Token refresh failed for', sub.code, ':', data.substring(0, 200));
+              }
+            } catch(e){ console.log('Token refresh parse error:', e.message); }
+          });
+        });
+        req2.on('error', function(e){ console.log('Token refresh request error:', e.message); });
+        req2.write(body); req2.end();
+      });
+    })
+    .catch(function(e){ console.log('Token refresh DB error:', e.message); });
+  });
+}
+
+// Run token refresh every 110 minutes (tokens last 2 hours)
+setInterval(refreshAllEbayTokens, 110 * 60 * 1000);
+
 // Schedule daily reports at 8pm
 function scheduleDailyReports() {
   setInterval(function() {
@@ -1121,6 +1168,177 @@ var server = http.createServer(function(req, res) {
             };
           });
           res.writeHead(200); res.end(JSON.stringify({ attendance: result, date: todayStr }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Weekly history (for portal + tablet) ──
+  if (pathname === '/tc/weekly-history' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var pin = parsed.query.pin || ''; // optional - if provided, only return that employee
+    var weekStart = parsed.query.weekStart || '';
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var employees = sub.employees || [];
+      // If PIN provided, filter to that employee only
+      if (pin) {
+        var emp = employees.find(function(e){ return e.pin === pin; });
+        if (!emp) { res.writeHead(200); res.end(JSON.stringify({ error: 'Invalid PIN' })); return; }
+        employees = [emp];
+      }
+      // Calculate week Monday
+      var now = new Date();
+      var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+      var monday;
+      if (weekStart) {
+        monday = new Date(weekStart + 'T00:00:00Z');
+      } else {
+        var dayOfWeek = localNow.getUTCDay();
+        var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+        monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+      }
+      var sunday = new Date(monday.getTime() + 6 * 86400000);
+      var mondayStr = monday.toISOString().split('T')[0];
+      var sundayStr = sunday.toISOString().split('T')[0];
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        database.collection('timeclock').find({
+          subscriberCode: code,
+          localDate: { $gte: mondayStr, $lte: sundayStr }
+        }).sort({ createdAt: 1 }).toArray()
+        .then(function(punches) {
+          var punchLabels = ['Checked In', 'Started Lunch', 'Ended Lunch', 'Checked Out', 'Checked In Again', 'Checked Out'];
+          var result = employees.map(function(emp) {
+            var empPunches = punches.filter(function(p){ return p.employeeName === emp.name; });
+            var days = [];
+            var totalHours = 0;
+            for (var d = 0; d <= 6; d++) {
+              var dayDate = new Date(monday.getTime() + d * 86400000);
+              var dateStr = dayDate.toISOString().split('T')[0];
+              var dayPunches = empPunches.filter(function(p){ return p.localDate === dateStr; });
+              var firstIn = dayPunches.find(function(p){ return p.type === 'in'; });
+              var lastOut = null;
+              for (var i = dayPunches.length-1; i >= 0; i--) { if(dayPunches[i].type==='out'){lastOut=dayPunches[i];break;} }
+              var hrs = 0;
+              if (firstIn) {
+                var end = lastOut ? new Date(lastOut.createdAt) : (dateStr === localNow.toISOString().split('T')[0] ? now : new Date(lastOut ? lastOut.createdAt : firstIn.createdAt));
+                if (lastOut) hrs = Math.round((new Date(lastOut.createdAt) - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+              }
+              totalHours += hrs;
+              days.push({
+                date: dateStr,
+                dayName: ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][dayDate.getUTCDay()],
+                hours: hrs,
+                absent: dayPunches.length === 0,
+                inProgress: !!firstIn && !lastOut,
+                punches: dayPunches.map(function(p, i){ return { type: p.type, time: p.localTime, label: punchLabels[i] || (p.type === 'in' ? 'Checked In' : 'Checked Out') }; })
+              });
+            }
+            return {
+              name: emp.name,
+              hourlyRate: emp.hourlyRate || 0,
+              currency: emp.currency || 'USD',
+              payPeriod: emp.payPeriod || 'biweekly',
+              country: emp.country || 'US',
+              totalHours: Math.round(totalHours * 10) / 10,
+              weekStart: mondayStr,
+              weekEnd: sundayStr,
+              days: days
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({ employees: result, weekStart: mondayStr, weekEnd: sundayStr }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Pay period summary ──
+  if (pathname === '/tc/pay-period' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    var US_PERIOD_ANCHOR = new Date('2026-04-13T00:00:00Z'); // Apr 13 2026
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var employees = sub.employees || [];
+      var now = new Date();
+      var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+      // Calculate current week Mon-Sun
+      var dayOfWeek = localNow.getUTCDay();
+      var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+      var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+      var sunday = new Date(monday.getTime() + 6 * 86400000);
+      // Calculate US biweekly period
+      var msSinceAnchor = monday.getTime() - US_PERIOD_ANCHOR.getTime();
+      var weeksSinceAnchor = Math.floor(msSinceAnchor / (7 * 86400000));
+      var periodWeek = Math.floor(weeksSinceAnchor / 2) * 2;
+      var usPeriodStart = new Date(US_PERIOD_ANCHOR.getTime() + periodWeek * 7 * 86400000);
+      var usPeriodEnd = new Date(usPeriodStart.getTime() + 13 * 86400000);
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        var mondayStr = monday.toISOString().split('T')[0];
+        var sundayStr = sunday.toISOString().split('T')[0];
+        var usPeriodStartStr = usPeriodStart.toISOString().split('T')[0];
+        var usPeriodEndStr = usPeriodEnd.toISOString().split('T')[0];
+        // Fetch all punches for both periods
+        var earliestDate = usPeriodStartStr < mondayStr ? usPeriodStartStr : mondayStr;
+        var latestDate = usPeriodEndStr > sundayStr ? usPeriodEndStr : sundayStr;
+        database.collection('timeclock').find({
+          subscriberCode: code,
+          localDate: { $gte: earliestDate, $lte: latestDate }
+        }).sort({ createdAt: 1 }).toArray()
+        .then(function(punches) {
+          var punchLabels = ['Checked In', 'Started Lunch', 'Ended Lunch', 'Checked Out', 'Checked In Again', 'Checked Out'];
+          var result = employees.map(function(emp) {
+            var isMX = emp.country === 'MX' || emp.currency === 'MXN';
+            var periodStart = isMX ? mondayStr : usPeriodStartStr;
+            var periodEnd = isMX ? sundayStr : usPeriodEndStr;
+            var empPunches = punches.filter(function(p){ return p.employeeName === emp.name && p.localDate >= periodStart && p.localDate <= periodEnd; });
+            // Build days
+            var startDate = new Date(periodStart + 'T00:00:00Z');
+            var endDate = new Date(periodEnd + 'T00:00:00Z');
+            var days = [];
+            var totalHours = 0;
+            for (var d = startDate; d <= endDate; d = new Date(d.getTime() + 86400000)) {
+              var dateStr = d.toISOString().split('T')[0];
+              var dayPunches = empPunches.filter(function(p){ return p.localDate === dateStr; });
+              var firstIn = dayPunches.find(function(p){ return p.type === 'in'; });
+              var lastOut = null;
+              for (var i = dayPunches.length-1; i >= 0; i--) { if(dayPunches[i].type==='out'){lastOut=dayPunches[i];break;} }
+              var hrs = 0;
+              if (firstIn && lastOut) hrs = Math.round((new Date(lastOut.createdAt) - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+              else if (firstIn && !lastOut && dateStr === localNow.toISOString().split('T')[0]) hrs = Math.round((now - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+              totalHours += hrs;
+              var dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+              days.push({
+                date: dateStr,
+                dayName: dayNames[d.getUTCDay()],
+                hours: hrs,
+                absent: dayPunches.length === 0,
+                punches: dayPunches.map(function(p, i){ return { type: p.type, time: p.localTime, label: punchLabels[i] || (p.type==='in'?'Checked In':'Checked Out') }; })
+              });
+            }
+            var rate = parseFloat(emp.hourlyRate || 0);
+            var payOwed = Math.round(totalHours * rate * 100) / 100;
+            return {
+              name: emp.name,
+              hourlyRate: rate,
+              currency: emp.currency || 'USD',
+              payPeriod: isMX ? 'weekly' : 'biweekly',
+              country: emp.country || 'US',
+              periodStart: periodStart,
+              periodEnd: periodEnd,
+              totalHours: Math.round(totalHours * 10) / 10,
+              payOwed: payOwed,
+              days: days
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({ employees: result }));
         })
         .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
       });
