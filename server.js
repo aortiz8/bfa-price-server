@@ -1657,6 +1657,35 @@ var server = http.createServer(function(req, res) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+
+        // ── Safety validation ──
+        // 1. Never overwrite employees with fewer than already saved
+        if (data.employees !== undefined) {
+          var existingCount = (sub.employees || []).length;
+          var newCount = (data.employees || []).length;
+          if (existingCount > 0 && newCount < existingCount) {
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Save blocked: you currently have ' + existingCount + ' employees but this save only contains ' + newCount + '. Please check and try again.' }));
+            return;
+          }
+          // Never save employees with missing names or PINs
+          var invalid = (data.employees || []).filter(function(e){ return !e.name || !e.pin; });
+          if (invalid.length > 0) {
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Save blocked: one or more employees are missing a name or PIN.' }));
+            return;
+          }
+        }
+        // 2. Never overwrite eBay credentials with empty values
+        if (data.ebayClientId !== undefined && !data.ebayClientId && sub.ebayClientId) {
+          res.writeHead(200); res.end(JSON.stringify({ error: 'Save blocked: eBay Client ID cannot be cleared.' })); return;
+        }
+        if (data.ebayUserToken !== undefined && !data.ebayUserToken && sub.ebayUserToken) {
+          res.writeHead(200); res.end(JSON.stringify({ error: 'Save blocked: eBay User Token cannot be cleared.' })); return;
+        }
+        // 3. Never overwrite business name with empty
+        if (data.businessName !== undefined && !data.businessName.trim() && sub.businessName) {
+          res.writeHead(200); res.end(JSON.stringify({ error: 'Save blocked: Business name cannot be empty.' })); return;
+        }
+
         // Only allow updating safe fields
         var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
