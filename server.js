@@ -9,7 +9,7 @@ var PORT = process.env.PORT || 3000;
 var CLIENT_ID = process.env.EBAY_CLIENT_ID || 'CodexBro-Booksfor-PRD-66c135696-2728b4d0';
 var CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || 'PRD-6c135696e4a6-8789-475a-8eaf-1662';
 var DEV_ID = process.env.EBAY_DEV_ID || '3e7db631-fffe-4cd8-92b6-6bca13515742';
-var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#I^3#f^0#p^3#r^0#t^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';
+var USER_TOKEN = process.env.EBAY_USER_TOKEN || 'v^1.1#i^1#f^0#r^1#p^3#I^3#t^Ul4xMF8yOkVBM0U2OUZBMEY0MDY0QjYxOEVCQTM2OTZFMTg0OEIwXzJfMSNFXjI2MA==';
 var ANTHROPIC_KEY = process.env.ANTHROPIC_KEY || '';
 var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
 var MONGODB_URI = (process.env.MONGODB_URI || 'mongodb+srv://booksforagesbookmobile_db_user:nkBsVNFyqDEUGWQv@booksforages.w8exzl5.mongodb.net/booksforages?retryWrites=true&w=majority&appName=booksforages').replace(/[\r\n]/g,'').trim();
@@ -683,6 +683,88 @@ var server = http.createServer(function(req, res) {
       }
       fetchOrders(0);
     });
+    return;
+  }
+
+  // ── eBay OAuth: Start flow ──
+  if (pathname === '/ebay/auth' && req.method === 'GET') {
+    var code = (parsed.query.code || '').replace(/[\r\n]/g,'').trim();
+    if (!code) { res.writeHead(400); res.end('Missing subscriber code'); return; }
+    var RUNAME = 'Codex_Brothers_-CodexBro-Booksf-ixdtwam';
+    var scopes = [
+      'https://api.ebay.com/oauth/api_scope',
+      'https://api.ebay.com/oauth/api_scope/sell.fulfillment.readonly',
+      'https://api.ebay.com/oauth/api_scope/sell.finances',
+      'https://api.ebay.com/oauth/api_scope/sell.inventory.readonly',
+      'https://api.ebay.com/oauth/api_scope/sell.account.readonly'
+    ].join(' ');
+    var authUrl = 'https://auth.ebay.com/oauth2/authorize?client_id=' + CLIENT_ID
+      + '&response_type=code'
+      + '&redirect_uri=' + encodeURIComponent(RUNAME)
+      + '&scope=' + encodeURIComponent(scopes)
+      + '&state=' + encodeURIComponent(code);
+    res.writeHead(302, { 'Location': authUrl });
+    res.end();
+    return;
+  }
+
+  // ── eBay OAuth: Callback ──
+  if (pathname === '/ebay/callback' && req.method === 'GET') {
+    var authCode = parsed.query.code || '';
+    var subscriberCode = (parsed.query.state || '').toUpperCase();
+    if (!authCode) {
+      res.writeHead(200); res.end('<html><body><h2>❌ eBay connection failed. Please try again.</h2></body></html>');
+      return;
+    }
+    var RUNAME = 'Codex_Brothers_-CodexBro-Booksf-ixdtwam';
+    var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
+    var body = 'grant_type=authorization_code&code=' + encodeURIComponent(authCode) + '&redirect_uri=' + encodeURIComponent(RUNAME);
+    var opts = {
+      hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + credentials,
+        'Content-Length': Buffer.byteLength(body)
+      }
+    };
+    var req2 = https.request(opts, function(r) {
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        try {
+          var json = JSON.parse(data);
+          if (!json.access_token) {
+            res.writeHead(200); res.end('<html><body><h2>❌ Failed to get token: ' + data + '</h2></body></html>');
+            return;
+          }
+          var oauthToken = json.access_token;
+          var refreshToken = json.refresh_token || '';
+          var expiresIn = json.expires_in || 7200;
+          // Save to MongoDB
+          connectMongo(function(err, database) {
+            if (err || !database) {
+              res.writeHead(200); res.end('<html><body><h2>❌ Database error. Please try again.</h2></body></html>');
+              return;
+            }
+            var escapedCode = subscriberCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            database.collection('subscribers').updateOne(
+              { code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } },
+              { $set: { ebayOAuthToken: oauthToken, ebayRefreshToken: refreshToken, ebayOAuthExpiry: new Date(Date.now() + expiresIn * 1000).toISOString() } }
+            )
+            .then(function() {
+              res.writeHead(200); res.end('<html><head><style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0a0c10;color:#fff;text-align:center;} h2{color:#00c97a;} p{color:#aaa;}</style></head><body><h2>✅ eBay Account Connected!</h2><p>Your eBay sales data is now linked. You can close this window and return to your portal.</p></body></html>');
+            })
+            .catch(function(e) {
+              res.writeHead(200); res.end('<html><body><h2>❌ Save error: ' + e.message + '</h2></body></html>');
+            });
+          });
+        } catch(e) {
+          res.writeHead(200); res.end('<html><body><h2>❌ Parse error</h2></body></html>');
+        }
+      });
+    });
+    req2.on('error', function(e){ res.writeHead(200); res.end('<html><body><h2>❌ ' + e.message + '</h2></body></html>'); });
+    req2.write(body); req2.end();
     return;
   }
 
