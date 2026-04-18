@@ -890,12 +890,12 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // ── Timeclock: Clear punches (admin only) ──
+  // ── Timeclock: Clear punches ──
   if (pathname === '/tc/clear' && req.method === 'GET') {
-    if (!isAdmin) { res.writeHead(403); res.end(JSON.stringify({ error: 'Unauthorized' })); return; }
     var code = (parsed.query.code || '').toUpperCase();
     var name = parsed.query.name || '';
     var date = parsed.query.date || '';
+    if (!code) { res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
     connectMongo(function(err, database) {
       if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
       var query = { subscriberCode: code };
