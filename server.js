@@ -890,6 +890,211 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Timeclock: Get QR token ──
+  if (pathname === '/tc/qr' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      // Generate a token based on current 60-second window
+      var window = Math.floor(Date.now() / 60000);
+      var token = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window).digest('hex').substring(0, 12);
+      var expiresIn = 60 - (Date.now() % 60000) / 1000;
+      var checkinUrl = 'https://heartfelt-pony-7a5b16.netlify.app/checkin.html?token=' + token + '&code=' + code;
+      res.writeHead(200); res.end(JSON.stringify({ token: token, checkinUrl: checkinUrl, expiresIn: Math.round(expiresIn) }));
+    });
+    return;
+  }
+
+  // ── Timeclock: Check in/out ──
+  if (pathname === '/tc/checkin' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      var token = data.token || '';
+      var pin = data.pin || '';
+      var offsetMinutes = parseInt(data.offset || '0');
+      getSubscriber(code, function(err, sub) {
+        if (!sub) { res.writeHead(200); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        // Validate token - check current and previous window (allow 60s grace)
+        var now = Date.now();
+        var window1 = Math.floor(now / 60000);
+        var window2 = window1 - 1;
+        var validToken1 = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window1).digest('hex').substring(0, 12);
+        var validToken2 = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window2).digest('hex').substring(0, 12);
+        if (token !== validToken1 && token !== validToken2) {
+          res.writeHead(200); res.end(JSON.stringify({ error: 'QR code expired. Please scan the latest QR code.' })); return;
+        }
+        // Find employee by PIN
+        var employees = sub.employees || [];
+        var emp = employees.find(function(e){ return e.pin === pin; });
+        if (!emp) { res.writeHead(200); res.end(JSON.stringify({ error: 'Invalid PIN. Please try again.' })); return; }
+        // Log the punch
+        connectMongo(function(err, database) {
+          if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'Database error' })); return; }
+          var nowDate = new Date();
+          var localNow = new Date(nowDate.getTime() - offsetMinutes * 60000);
+          var localDate = localNow.getUTCFullYear() + '-' + String(localNow.getUTCMonth()+1).padStart(2,'0') + '-' + String(localNow.getUTCDate()).padStart(2,'0');
+          var localTime = localNow.toISOString().substring(11, 19);
+          // Find last punch today to determine in/out
+          database.collection('timeclock').find({
+            subscriberCode: code,
+            employeeName: emp.name,
+            localDate: localDate
+          }).sort({ createdAt: -1 }).limit(1).toArray()
+          .then(function(punches) {
+            var lastPunch = punches[0];
+            var type = (!lastPunch || lastPunch.type === 'out') ? 'in' : 'out';
+            var entry = {
+              subscriberCode: code,
+              employeeName: emp.name,
+              employeePin: pin,
+              type: type,
+              localDate: localDate,
+              localTime: localTime,
+              createdAt: nowDate.toISOString(),
+              offsetMinutes: offsetMinutes
+            };
+            return database.collection('timeclock').insertOne(entry).then(function() {
+              // Calculate hours today
+              return database.collection('timeclock').find({
+                subscriberCode: code, employeeName: emp.name, localDate: localDate
+              }).sort({ createdAt: 1 }).toArray();
+            });
+          })
+          .then(function(todayPunches) {
+            var type = todayPunches[todayPunches.length - 1].type;
+            // Calculate hours: first in to last out (or now if still in)
+            var firstIn = todayPunches.find(function(p){ return p.type === 'in'; });
+            var lastOut = null;
+            for (var i = todayPunches.length - 1; i >= 0; i--) {
+              if (todayPunches[i].type === 'out') { lastOut = todayPunches[i]; break; }
+            }
+            var hoursToday = 0;
+            if (firstIn) {
+              var endTime = lastOut ? new Date(lastOut.createdAt) : new Date();
+              hoursToday = Math.round((endTime - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+            }
+            res.writeHead(200); res.end(JSON.stringify({
+              success: true,
+              type: type,
+              employeeName: emp.name,
+              localTime: localTime,
+              hoursToday: hoursToday,
+              allPunches: todayPunches.map(function(p){ return { type: p.type, time: p.localTime }; })
+            }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Employee hours viewer (for tablet) ──
+  if (pathname === '/tc/my-hours' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var pin = parsed.query.pin || '';
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var emp = (sub.employees || []).find(function(e){ return e.pin === pin; });
+      if (!emp) { res.writeHead(200); res.end(JSON.stringify({ error: 'Invalid PIN' })); return; }
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        // Get this week's punches
+        var now = new Date();
+        var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+        var dayOfWeek = localNow.getUTCDay();
+        var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+        var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+        var mondayStr = monday.getUTCFullYear() + '-' + String(monday.getUTCMonth()+1).padStart(2,'0') + '-' + String(monday.getUTCDate()).padStart(2,'0');
+        database.collection('timeclock').find({
+          subscriberCode: code, employeeName: emp.name, localDate: { $gte: mondayStr }
+        }).sort({ createdAt: 1 }).toArray()
+        .then(function(punches) {
+          // Group by date
+          var byDate = {};
+          punches.forEach(function(p) {
+            if (!byDate[p.localDate]) byDate[p.localDate] = [];
+            byDate[p.localDate].push(p);
+          });
+          var days = [];
+          var totalHours = 0;
+          Object.keys(byDate).sort().forEach(function(date) {
+            var dayPunches = byDate[date];
+            var firstIn = dayPunches.find(function(p){ return p.type === 'in'; });
+            var lastOut = null;
+            for (var i = dayPunches.length-1; i >= 0; i--) { if(dayPunches[i].type === 'out'){ lastOut = dayPunches[i]; break; } }
+            var hrs = 0;
+            if (firstIn) {
+              var end = lastOut ? new Date(lastOut.createdAt) : now;
+              hrs = Math.round((end - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+            }
+            totalHours += hrs;
+            days.push({ date: date, hours: hrs, inProgress: !lastOut && !!firstIn });
+          });
+          // Check current status
+          var todayStr = localNow.getUTCFullYear() + '-' + String(localNow.getUTCMonth()+1).padStart(2,'0') + '-' + String(localNow.getUTCDate()).padStart(2,'0');
+          var todayPunches = byDate[todayStr] || [];
+          var lastPunch = todayPunches[todayPunches.length - 1];
+          var currentStatus = lastPunch ? lastPunch.type : 'out';
+          res.writeHead(200); res.end(JSON.stringify({
+            name: emp.name,
+            currentStatus: currentStatus,
+            totalHoursThisWeek: Math.round(totalHours * 10) / 10,
+            days: days
+          }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Attendance for portal activity page ──
+  if (pathname === '/tc/attendance' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var employees = sub.employees || [];
+      var now = new Date();
+      var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+      var todayStr = localNow.getUTCFullYear() + '-' + String(localNow.getUTCMonth()+1).padStart(2,'0') + '-' + String(localNow.getUTCDate()).padStart(2,'0');
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ attendance: [] })); return; }
+        database.collection('timeclock').find({
+          subscriberCode: code, localDate: todayStr
+        }).sort({ createdAt: 1 }).toArray()
+        .then(function(punches) {
+          var result = employees.map(function(emp) {
+            var empPunches = punches.filter(function(p){ return p.employeeName === emp.name; });
+            var firstIn = empPunches.find(function(p){ return p.type === 'in'; });
+            var lastPunch = empPunches[empPunches.length - 1];
+            var currentStatus = lastPunch ? lastPunch.type : 'absent';
+            var hoursToday = 0;
+            if (firstIn) {
+              var lastOut = null;
+              for (var i = empPunches.length-1; i >= 0; i--) { if(empPunches[i].type==='out'){lastOut=empPunches[i];break;} }
+              var end = lastOut ? new Date(lastOut.createdAt) : now;
+              hoursToday = Math.round((end - new Date(firstIn.createdAt)) / 3600000 * 10) / 10;
+            }
+            return {
+              name: emp.name,
+              status: currentStatus,
+              firstIn: firstIn ? firstIn.localTime : null,
+              lastTime: lastPunch ? lastPunch.localTime : null,
+              hoursToday: hoursToday,
+              allPunches: empPunches.map(function(p){ return { type: p.type, time: p.localTime }; })
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({ attendance: result, date: todayStr }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
   // ── Test eBay Sales API ──
   if (pathname === '/test-ebay-sales' && req.method === 'GET') {
     var testCode = (parsed.query.code || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
