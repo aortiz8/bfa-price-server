@@ -323,7 +323,20 @@ function logListing(data, cb) {
 
 var COND_MAP = { '1000': 'NEW', '2750': 'LIKE_NEW', '4000': 'VERY_GOOD', '5000': 'GOOD', '6000': 'ACCEPTABLE' };
 
+function cleanDescription(desc){
+  // Remove markdown bold **text**
+  desc = desc.replace(/\*\*([^*]+)\*\*/g, '$1');
+  // Remove markdown italic *text* (but not standalone *)
+  desc = desc.replace(/\*([^*\n]+)\*/g, '$1');
+  // Convert double line breaks to paragraph breaks
+  desc = desc.replace(/\n\n/g, '<br><br>');
+  // Convert single line breaks
+  desc = desc.replace(/\n/g, '<br>');
+  return desc;
+}
+
 function createListing(title, description, price, isbn, conditionId, pictureUrls, language, author, bookTitle, publisher, year, edition, format, signed, signedBy, inscribed, illustrator, topic, features, vintage, sku, userToken, devId, shippingPolicyId, paymentPolicyId, returnPolicyId, cb) {
+  description = cleanDescription(description);
   var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   var pictures = '';
   if (pictureUrls && pictureUrls.length > 0) {
