@@ -828,8 +828,8 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // ── eBay OAuth: Callback ──
-  if (pathname === '/ebay/callback' && req.method === 'GET') {
+  // ── eBay OAuth: Callback (both /callback and /ebay/callback) ──
+  if ((pathname === '/ebay/callback' || pathname === '/callback') && req.method === 'GET') {
     var authCode = parsed.query.code || '';
     var subscriberCode = (parsed.query.state || '').toUpperCase();
     console.log('eBay callback received. authCode length:', authCode.length, 'subscriberCode:', subscriberCode);
