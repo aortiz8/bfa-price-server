@@ -591,82 +591,114 @@ var server = http.createServer(function(req, res) {
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
-      var allOrders = [];
-      function fetchOrders(offset) {
-        var path = '/sell/fulfillment/v1/order?limit=50&offset=' + offset;
-        var opts = {
-          hostname: 'api.ebay.com', path: path, method: 'GET',
-          headers: { 'Authorization': 'Bearer ' + userToken, 'Content-Type': 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }
-        };
-        var req2 = https.request(opts, function(r) {
-          var data = '';
-          r.on('data', function(c){ data += c; });
-          r.on('end', function(){
-            try {
-              var json = JSON.parse(data);
-              if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
-              var orders = json.orders || [];
-              allOrders = allOrders.concat(orders);
-              var total = json.total || 0;
-              if (allOrders.length < total && orders.length === 50) {
-                fetchOrders(offset + 50);
-              } else {
-                // Separate into pending, canceled, action needed
-                var pending = [];
-                var canceled = [];
-                var actionNeeded = [];
-                allOrders.forEach(function(o) {
-                  var cancelState = o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED';
-                  if (cancelState === 'CANCELED') {
-                    canceled.push(o);
-                  } else if (cancelState === 'CANCEL_REQUESTED') {
-                    actionNeeded.push(o);
-                  } else if (o.orderFulfillmentStatus === 'NOT_STARTED' && o.orderPaymentStatus === 'PAID') {
-                    pending.push(o);
+      // Get snoozed order IDs from MongoDB
+      connectMongo(function(err, database) {
+        var snoozedIds = [];
+        var getSnoozed = database ? database.collection('snoozed_orders').find({ subscriberCode: code }).toArray() : Promise.resolve([]);
+        getSnoozed.then(function(snoozed) {
+          snoozedIds = (snoozed || []).map(function(s){ return s.orderId; });
+          // 30-day date filter
+          var thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+          var allOrders = [];
+          function fetchOrders(offset) {
+            var path = '/sell/fulfillment/v1/order?filter=' + encodeURIComponent('creationdate:[' + thirtyDaysAgo + '..]') + '&limit=50&offset=' + offset;
+            var opts = {
+              hostname: 'api.ebay.com', path: path, method: 'GET',
+              headers: { 'Authorization': 'Bearer ' + userToken, 'Content-Type': 'application/json', 'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' }
+            };
+            var req2 = https.request(opts, function(r) {
+              var data = '';
+              r.on('data', function(c){ data += c; });
+              r.on('end', function(){
+                try {
+                  var json = JSON.parse(data);
+                  if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
+                  var orders = json.orders || [];
+                  allOrders = allOrders.concat(orders);
+                  var total = json.total || 0;
+                  if (allOrders.length < total && orders.length === 50) {
+                    fetchOrders(offset + 50);
+                  } else {
+                    var pending = [];
+                    var canceled = [];
+                    var actionNeeded = [];
+                    var now = new Date();
+                    allOrders.forEach(function(o) {
+                      if (snoozedIds.indexOf(o.orderId) > -1) return; // skip snoozed
+                      var cancelState = o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED';
+                      if (cancelState === 'CANCELED') {
+                        canceled.push(o);
+                      } else if (cancelState === 'CANCEL_REQUESTED') {
+                        actionNeeded.push(o);
+                      } else if (o.orderFulfillmentStatus === 'NOT_STARTED' && o.orderPaymentStatus === 'PAID') {
+                        pending.push(o);
+                      }
+                    });
+                    function simplify(o) {
+                      var item = o.lineItems[0] || {};
+                      var created = new Date(o.creationDate);
+                      var ageHours = Math.round((now - created) / 3600000 * 10) / 10;
+                      var skuRaw = item.sku || '';
+                      var skuPrefix = skuRaw.split(/[-\.]/)[0] || skuRaw;
+                      return {
+                        orderId: o.orderId,
+                        orderDate: o.creationDate,
+                        ageHours: ageHours,
+                        platform: 'eBay',
+                        title: item.title || '',
+                        sku: skuRaw,
+                        skuPrefix: skuPrefix,
+                        price: parseFloat(o.pricingSummary.priceSubtotal.value),
+                        condition: item.condition || '',
+                        cancelState: o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED'
+                      };
+                    }
+                    pending = pending.map(simplify).sort(function(a, b) {
+                      var aIsAlpha = /^[A-Za-z]/.test(a.skuPrefix);
+                      var bIsAlpha = /^[A-Za-z]/.test(b.skuPrefix);
+                      if (aIsAlpha && !bIsAlpha) return -1;
+                      if (!aIsAlpha && bIsAlpha) return 1;
+                      return a.sku.localeCompare(b.sku);
+                    });
+                    res.writeHead(200); res.end(JSON.stringify({
+                      pending: pending,
+                      canceled: canceled.map(simplify),
+                      actionNeeded: actionNeeded.map(simplify)
+                    }));
                   }
-                });
-                var now = new Date();
-                function simplify(o) {
-                  var item = o.lineItems[0] || {};
-                  var created = new Date(o.creationDate);
-                  var ageHours = Math.round((now - created) / 3600000 * 10) / 10;
-                  var skuRaw = item.sku || '';
-                  var skuPrefix = skuRaw.split(/[-\.]/)[0] || skuRaw;
-                  return {
-                    orderId: o.orderId,
-                    orderDate: o.creationDate,
-                    ageHours: ageHours,
-                    platform: 'eBay',
-                    title: item.title || '',
-                    sku: skuRaw,
-                    skuPrefix: skuPrefix,
-                    price: parseFloat(o.pricingSummary.priceSubtotal.value),
-                    condition: item.condition || '',
-                    cancelState: o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED'
-                  };
-                }
-                // Sort pending by SKU prefix: alpha first then numeric, then by SKU
-                pending = pending.map(simplify).sort(function(a, b) {
-                  var aIsAlpha = /^[A-Za-z]/.test(a.skuPrefix);
-                  var bIsAlpha = /^[A-Za-z]/.test(b.skuPrefix);
-                  if (aIsAlpha && !bIsAlpha) return -1;
-                  if (!aIsAlpha && bIsAlpha) return 1;
-                  return a.sku.localeCompare(b.sku);
-                });
-                res.writeHead(200); res.end(JSON.stringify({
-                  pending: pending,
-                  canceled: canceled.map(simplify),
-                  actionNeeded: actionNeeded.map(simplify)
-                }));
-              }
-            } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
-          });
+                } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
+              });
+            });
+            req2.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
+            req2.setTimeout(20000, function(){ req2.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
+            req2.end();
+          }
+          fetchOrders(0);
+        }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error', orders: [] })); });
+      });
+    });
+    return;
+  }
+
+  // ── Snooze an order ──
+  if (pathname === '/my/ebay/snooze' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      var orderId = data.orderId || '';
+      if (!code || !orderId) { res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code or orderId' })); return; }
+      getSubscriber(code, function(err, sub) {
+        if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        connectMongo(function(err, database) {
+          if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+          database.collection('snoozed_orders').updateOne(
+            { subscriberCode: code, orderId: orderId },
+            { $set: { subscriberCode: code, orderId: orderId, snoozedAt: new Date().toISOString() } },
+            { upsert: true }
+          )
+          .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+          .catch(function(e) { res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
         });
-        req2.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
-        req2.setTimeout(20000, function(){ req2.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
-        req2.end();
-      }
-      fetchOrders(0);
+      });
     });
     return;
   }
