@@ -1372,6 +1372,54 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Warehouse: Delete item ──
+  if (pathname === '/warehouse/delete-item' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+      getSubscriber(code, function(err, sub){
+        if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        // End eBay listing if live
+        if(data.ebayItemId){
+          var userToken = sub.ebayUserToken || USER_TOKEN;
+          var devId = sub.ebayDevId || DEV_ID;
+          var endXml = '<?xml version="1.0" encoding="utf-8"?>'
+            + '<EndItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+            + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
+            + '<ItemID>' + data.ebayItemId + '</ItemID>'
+            + '<EndingReason>NotAvailable</EndingReason>'
+            + '</EndItemRequest>';
+          var endOpts = {
+            hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+            headers: {
+              'X-EBAY-API-SITEID': '0', 'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+              'X-EBAY-API-CALL-NAME': 'EndItem', 'X-EBAY-API-DEV-NAME': devId,
+              'X-EBAY-API-APP-NAME': (sub.ebayClientId || CLIENT_ID),
+              'X-EBAY-API-CERT-NAME': (sub.ebayClientSecret || CLIENT_SECRET),
+              'Content-Type': 'text/xml', 'Content-Length': Buffer.byteLength(endXml)
+            }
+          };
+          var endReq = https.request(endOpts, function(endRes){
+            var d=''; endRes.on('data',function(c){d+=c;}); endRes.on('end',function(){ console.log('eBay end item:', d.substring(0,200)); });
+          });
+          endReq.on('error',function(){});
+          endReq.write(endXml); endReq.end();
+        }
+        // Mark as deleted in MongoDB and retire sequence
+        connectMongo(function(err, database){
+          if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+          var query = data.itemId ? { _id: new (require('mongodb').ObjectId)(data.itemId) } : { code: code, sku: data.sku };
+          database.collection('warehouse_inventory').updateOne(query, {
+            $set: { status: 'deleted', deletedAt: new Date(), sequenceRetired: true }
+          })
+          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        });
+      });
+    });
+    return;
+  }
+
   // ── Warehouse: List item on eBay LIVE (no schedule) ──
   if (pathname === '/warehouse/list-ebay' && req.method === 'POST') {
     parseBody(req, function(err, data) {
