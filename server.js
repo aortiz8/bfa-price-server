@@ -20,6 +20,7 @@ var AMAZON_CLIENT_ID = process.env.AMAZON_CLIENT_ID || '';
 var AMAZON_CLIENT_SECRET = process.env.AMAZON_CLIENT_SECRET || '';
 var AMAZON_REFRESH_TOKEN = process.env.AMAZON_REFRESH_TOKEN || '';
 var AMAZON_MARKETPLACE_ID = 'ATVPDKIKX0DER'; // US marketplace
+var AMAZON_SELLER_ID = process.env.AMAZON_SELLER_ID || 'ACH3QS6GNTU3L';
 
 // Amazon access token cache
 var amazonTokenCache = null;
@@ -1493,7 +1494,7 @@ var server = http.createServer(function(req, res) {
           });
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sub.amazonSellerId || '') + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sub.amazonSellerId || AMAZON_SELLER_ID) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
