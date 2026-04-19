@@ -1800,89 +1800,42 @@ var server = http.createServer(function(req, res) {
 
           if(!asin){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ASIN available' })); return; }
 
-          // Use the Feeds API with flat file inventory loader format
-          // This is the most reliable way to list used books on Amazon
-          var feedContent = 'sku\tprice\tquantity\tasin1\tcondition-type\tcondition-note\n'
-            + sku + '\t' + price + '\t1\t' + asin + '\t' + condition + '\tUsed book in ' + (data.conditionLabel || 'Good') + ' condition.\n';
-
-          // Step 1: Create the feed document
-          var createDocBody = JSON.stringify({ contentType: 'text/tab-separated-values;charset=UTF-8' });
-          var createDocOpts = {
+          // Use PATCH to create offer on existing ASIN
+          var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
+          var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
+          var body = JSON.stringify({
+            productType: 'PRODUCT',
+            patches: [
+              { op: 'replace', path: '/attributes/merchant_suggested_asin', value: [{ value: asin, marketplace_id: marketplaceId }] },
+              { op: 'replace', path: '/attributes/condition_type', value: [{ value: condition2, marketplace_id: marketplaceId }] },
+              { op: 'replace', path: '/attributes/purchasable_offer', value: [{ marketplace_id: marketplaceId, currency: 'USD', our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }] }] },
+              { op: 'replace', path: '/attributes/fulfillment_availability', value: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1, marketplace_id: marketplaceId }] }
+            ]
+          });
+          console.log('Amazon PATCH body:', body);
+          var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/feeds/2021-06-30/documents',
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-amz-access-token': accessToken,
-              'Content-Length': Buffer.byteLength(createDocBody)
-            }
+            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId + '&issueLocale=en_US',
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', 'x-amz-access-token': accessToken, 'Content-Length': Buffer.byteLength(body) }
           };
-          console.log('Creating feed document...');
-          var docReq = https.request(createDocOpts, function(docRes){
-            var docData = ''; docRes.on('data',function(c){docData+=c;}); docRes.on('end',function(){
-              console.log('Feed document response:', docRes.statusCode, docData);
+          var amzReq = https.request(opts, function(amzRes){
+            var amzData = ''; amzRes.on('data',function(c){amzData+=c;}); amzRes.on('end',function(){
+              console.log('Amazon PATCH response:', amzRes.statusCode, amzData);
               try{
-                var docJson = JSON.parse(docData);
-                if(!docJson.feedDocumentId){ res.writeHead(200); res.end(JSON.stringify({ error: 'Feed document creation failed: ' + docData })); return; }
-                var feedDocumentId = docJson.feedDocumentId;
-                var uploadUrl = docJson.url;
-
-                // Step 2: Upload the feed content to the S3 URL
-                var uploadBuf = Buffer.from(feedContent, 'utf8');
-                var uploadParsed = require('url').parse(uploadUrl);
-                var uploadOpts = {
-                  hostname: uploadParsed.hostname,
-                  path: uploadParsed.path,
-                  method: 'PUT',
-                  headers: {
-                    'Content-Type': 'text/tab-separated-values;charset=UTF-8',
-                    'Content-Length': uploadBuf.length
-                  }
-                };
-                var uploadReq = https.request(uploadOpts, function(uploadRes){
-                  uploadRes.on('data',function(){});
-                  uploadRes.on('end',function(){
-                    console.log('Upload response:', uploadRes.statusCode);
-                    // Step 3: Submit the feed
-                    var feedBody = JSON.stringify({
-                      feedType: 'POST_FLAT_FILE_INVLOADER_DATA',
-                      marketplaceIds: [marketplaceId],
-                      inputFeedDocumentId: feedDocumentId
-                    });
-                    var feedOpts = {
-                      hostname: 'sellingpartnerapi-na.amazon.com',
-                      path: '/feeds/2021-06-30/feeds',
-                      method: 'POST',
-                      headers: {
-                        'Content-Type': 'application/json',
-                        'x-amz-access-token': accessToken,
-                        'Content-Length': Buffer.byteLength(feedBody)
-                      }
-                    };
-                    var feedReq = https.request(feedOpts, function(feedRes){
-                      var feedData = ''; feedRes.on('data',function(c){feedData+=c;}); feedRes.on('end',function(){
-                        console.log('Feed submission response:', feedRes.statusCode, feedData);
-                        try{
-                          var feedJson = JSON.parse(feedData);
-                          if(feedJson.feedId){
-                            res.writeHead(200); res.end(JSON.stringify({ success: true, feedId: feedJson.feedId, asin: asin }));
-                          } else {
-                            res.writeHead(200); res.end(JSON.stringify({ error: 'Feed submission failed: ' + feedData }));
-                          }
-                        }catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: feedData })); }
-                      });
-                    });
-                    feedReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-                    feedReq.write(feedBody); feedReq.end();
-                  });
-                });
-                uploadReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Upload error: ' + e.message })); });
-                uploadReq.write(uploadBuf); uploadReq.end();
-              }catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message })); }
+                var json = JSON.parse(amzData);
+                if(amzRes.statusCode === 200 || amzRes.statusCode === 201 || (json.status && json.status !== 'INVALID')){
+                  res.writeHead(200); res.end(JSON.stringify({ success: true, asin: asin }));
+                } else {
+                  var errMsg = (json.errors && json.errors[0] && json.errors[0].message) || (json.issues && json.issues[0] && json.issues[0].message) || amzData;
+                  res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
+                }
+              }catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: amzData })); }
             });
           });
-          docReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-          docReq.write(createDocBody); docReq.end();
+          amzReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          amzReq.setTimeout(30000,function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+          amzReq.write(body); amzReq.end();
         });
       });
     });
