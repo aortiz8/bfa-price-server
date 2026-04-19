@@ -1372,6 +1372,86 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Warehouse: Save item to inventory ──
+  if (pathname === '/warehouse/item' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+      connectMongo(function(err, database) {
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        // Ensure SKU is unique
+        database.collection('warehouse_inventory').findOne({ sku: data.sku })
+        .then(function(existing){
+          if(existing){ res.writeHead(200); res.end(JSON.stringify({ error: 'SKU already exists' })); return; }
+          var item = {
+            code: code,
+            sku: data.sku,
+            isbn: data.isbn || '',
+            title: data.title || '',
+            author: data.author || '',
+            publisher: data.publisher || '',
+            year: data.year || '',
+            format: data.format || '',
+            condition: data.condition || 'Good',
+            price: parseFloat(data.price) || 9.99,
+            location: data.location || {},
+            listedOn: data.listedOn || [],
+            status: 'active',
+            createdAt: new Date()
+          };
+          return database.collection('warehouse_inventory').insertOne(item)
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, itemId: result.insertedId }));
+          });
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Warehouse: Get stats ──
+  if (pathname === '/warehouse/stats' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ totalItems: 0, recentActivity: [] })); return; }
+      Promise.all([
+        database.collection('warehouse_inventory').countDocuments({ code: code, status: 'active' }),
+        database.collection('warehouse_inventory').find({ code: code }).sort({ createdAt: -1 }).limit(6).toArray()
+      ]).then(function(results){
+        var total = results[0];
+        var recent = results[1].map(function(item){
+          return {
+            type: 'listed',
+            message: item.title + ' listed — ' + item.sku,
+            createdAt: item.createdAt
+          };
+        });
+        res.writeHead(200); res.end(JSON.stringify({ totalItems: total, recentActivity: recent }));
+      })
+      .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ totalItems: 0, recentActivity: [] })); });
+    });
+    return;
+  }
+
+  // ── Warehouse: Get inventory list ──
+  if (pathname === '/warehouse/inventory' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var status = parsed.query.status || 'active';
+    var limit = parseInt(parsed.query.limit || '50');
+    if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ items: [] })); return; }
+      database.collection('warehouse_inventory').find({ code: code, status: status }).sort({ createdAt: -1 }).limit(limit).toArray()
+      .then(function(items){
+        res.writeHead(200); res.end(JSON.stringify({ items: items }));
+      })
+      .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ items: [] })); });
+    });
+    return;
+  }
+
   // ── Test eBay Sales API ──
   if (pathname === '/test-ebay-sales' && req.method === 'GET') {
     var testCode = (parsed.query.code || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
