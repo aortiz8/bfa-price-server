@@ -1810,6 +1810,8 @@ var server = http.createServer(function(req, res) {
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
                 currency: 'USD',
+                audience: 'ALL',
+                start_at: { value: new Date().toISOString() },
                 our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
               }]
             }
