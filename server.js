@@ -1601,7 +1601,6 @@ var server = http.createServer(function(req, res) {
 
           var body = JSON.stringify({
             productType: 'BOOK',
-            requirements: 'LISTING_OFFER_ONLY',
             attributes: {
               merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition, marketplace_id: marketplaceId }],
@@ -1620,7 +1619,7 @@ var server = http.createServer(function(req, res) {
           console.log('Amazon listing body:', body);
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId + '&requirements=LISTING_OFFER_ONLY',
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -1686,6 +1685,7 @@ var server = http.createServer(function(req, res) {
           + '<DispatchTimeMax>2</DispatchTimeMax>'
           + '<ListingDuration>GTC</ListingDuration>'
           + '<ListingType>FixedPriceItem</ListingType>'
+          + '<PictureDetails><GalleryType>Gallery</GalleryType></PictureDetails>'
           + '<SKU>' + esc(data.sku || '') + '</SKU>'
           + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
           + pictureXml
