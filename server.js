@@ -1806,7 +1806,6 @@ var server = http.createServer(function(req, res) {
             attributes: {
               merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
-              merchant_shipping_group: [{ value: 'Base shipping - standard', marketplace_id: marketplaceId }],
               fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
