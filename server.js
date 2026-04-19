@@ -1666,7 +1666,7 @@ var server = http.createServer(function(req, res) {
           }]
         }
       });
-      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&mode=VALIDATION_PREVIEW';
+      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID;
       console.log('Validation path:', path);
       console.log('Validation body:', body);
       var opts = {
