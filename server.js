@@ -1463,6 +1463,105 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Warehouse: Lookup book from Amazon catalog by ISBN ──
+  if (pathname === '/warehouse/book-lookup' && req.method === 'GET') {
+    var isbn = (parsed.query.isbn || '').replace(/[^0-9X]/gi,'');
+    var code = (parsed.query.code || '').toUpperCase();
+    if(!isbn){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing ISBN' })); return; }
+    getAmazonAccessToken(function(err, accessToken){
+      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
+      var opts = {
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifierType=ISBN&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
+        method: 'GET',
+        headers: {
+          'x-amz-access-token': accessToken,
+          'Accept': 'application/json'
+        }
+      };
+      var amzReq = https.request(opts, function(amzRes){
+        var data = '';
+        amzRes.on('data', function(c){ data += c; });
+        amzRes.on('end', function(){
+          console.log('Amazon catalog response:', amzRes.statusCode, data.substring(0,800));
+          try {
+            var json = JSON.parse(data);
+            var items = json.items || [];
+            if(!items.length){ res.writeHead(200); res.end(JSON.stringify({ error: 'Book not found in Amazon catalog' })); return; }
+            var item = items[0];
+            var attrs = item.attributes || {};
+            var summaries = (item.summaries && item.summaries[0]) || {};
+            var images = item.images || [];
+            var dims = item.dimensions || [];
+
+            // Extract all useful fields
+            var title = (attrs.item_name && attrs.item_name[0] && attrs.item_name[0].value) || summaries.itemName || '';
+            var author = '';
+            if(attrs.contributor){ attrs.contributor.forEach(function(c){ if(c.role && c.role.value && c.role.value.toLowerCase().indexOf('author')>-1) author = c.value || ''; }); }
+            if(!author && attrs.author) author = (attrs.author[0] && attrs.author[0].value) || '';
+            var publisher = (attrs.publisher && attrs.publisher[0] && attrs.publisher[0].value) || '';
+            var pubDate = (attrs.publication_date && attrs.publication_date[0] && attrs.publication_date[0].value) || '';
+            var year = pubDate ? pubDate.substring(0,4) : '';
+            var language = (attrs.language && attrs.language[0] && attrs.language[0].value) || 'English';
+            var pages = (attrs.number_of_pages && attrs.number_of_pages[0] && attrs.number_of_pages[0].value) || '';
+            var edition = (attrs.edition && attrs.edition[0] && attrs.edition[0].value) || '';
+            var format = (attrs.binding && attrs.binding[0] && attrs.binding[0].value) || 'Paperback';
+            var description = (attrs.product_description && attrs.product_description[0] && attrs.product_description[0].value) || '';
+            var series = (attrs.series && attrs.series[0] && attrs.series[0].value) || '';
+            var grade = (attrs.grade && attrs.grade[0] && attrs.grade[0].value) || '';
+            var asin = item.asin || '';
+
+            // Get best cover image
+            var coverUrl = '';
+            var bestSize = 0;
+            images.forEach(function(imgGroup){
+              var imgs = imgGroup.images || [];
+              imgs.forEach(function(img){
+                if(img.variant === 'MAIN'){
+                  var h = img.height || 0;
+                  if(h > bestSize){ bestSize = h; coverUrl = img.link || ''; }
+                }
+              });
+            });
+
+            // Get book dimensions (width for shelf space)
+            var widthInches = null;
+            dims.forEach(function(dimGroup){
+              var d = dimGroup.dimensions || {};
+              if(d.width){ widthInches = parseFloat(d.width.value || 0); }
+            });
+
+            // Get list price
+            var listPrice = null;
+            if(attrs.list_price && attrs.list_price[0]) listPrice = parseFloat(attrs.list_price[0].value || 0);
+
+            res.writeHead(200); res.end(JSON.stringify({
+              asin: asin,
+              isbn: isbn,
+              title: title,
+              author: author,
+              publisher: publisher,
+              year: year,
+              language: language,
+              pages: pages,
+              edition: edition,
+              format: format,
+              description: description,
+              series: series,
+              coverUrl: coverUrl,
+              widthInches: widthInches,
+              listPrice: listPrice
+            }));
+          } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message })); }
+        });
+      });
+      amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      amzReq.setTimeout(15000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+      amzReq.end();
+    });
+    return;
+  }
+
   // ── Warehouse: List item on Amazon ──
   if (pathname === '/warehouse/list-amazon' && req.method === 'POST') {
     parseBody(req, function(err, data) {
@@ -1577,6 +1676,11 @@ var server = http.createServer(function(req, res) {
           + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
           + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
           + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
+          + '<NameValueList><n>Language</n><Value>' + esc(data.language || 'English') + '</Value></NameValueList>'
+          + (data.edition ? '<NameValueList><n>Edition</n><Value>' + esc(data.edition) + '</Value></NameValueList>' : '')
+          + (data.pages ? '<NameValueList><n>Number of Pages</n><Value>' + esc(String(data.pages)) + '</Value></NameValueList>' : '')
+          + (data.series ? '<NameValueList><n>Series</n><Value>' + esc(data.series).substring(0,65) + '</Value></NameValueList>' : '')
+          + (data.asin ? '<NameValueList><n>ASIN</n><Value>' + esc(data.asin) + '</Value></NameValueList>' : '')
           + '</ItemSpecifics>'
           + '</Item>'
           + '</AddItemRequest>';
