@@ -1576,24 +1576,109 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Warehouse: List item on Amazon ──
+  // ── Shared: build an Amazon SP-API listings payload (offer-only against existing ASIN) ──
+  function buildAmazonListingBody(opts){
+    var conditionMap = {
+      'New':        'new_new',
+      'Like New':   'used_like_new',
+      'Very Good':  'used_very_good',
+      'Good':       'used_good',
+      'Acceptable': 'used_acceptable'
+    };
+    var conditionValue = conditionMap[opts.conditionLabel] || 'used_good';
+    var price = parseFloat(opts.price);
+    if(!isFinite(price) || price <= 0) price = 9.99;
+    var attributes = {
+      merchant_suggested_asin: [{ value: opts.asin, marketplace_id: opts.marketplaceId }],
+      condition_type:          [{ value: conditionValue, marketplace_id: opts.marketplaceId }],
+      fulfillment_availability:[{
+        fulfillment_channel_code: 'DEFAULT',
+        quantity: 1,
+        marketplace_id: opts.marketplaceId
+      }],
+      purchasable_offer: [{
+        marketplace_id: opts.marketplaceId,
+        currency: 'USD',
+        our_price: [{ schedule: [{ value_with_tax: price }] }]
+      }]
+    };
+    if(opts.shippingGroup){
+      attributes.merchant_shipping_group = [{ value: opts.shippingGroup, marketplace_id: opts.marketplaceId }];
+    }
+    return JSON.stringify({
+      productType:  'PRODUCT',
+      requirements: 'LISTING_OFFER_ONLY',
+      attributes:   attributes
+    });
+  }
+
+  // ── Debug: Amazon VALIDATION_PREVIEW — returns real issues[] without creating a listing ──
+  // Hit: /warehouse/debug-amazon-validate?code=XXX&asin=0525559477&condition=Good&price=8.99
+  if (pathname === '/warehouse/debug-amazon-validate' && req.method === 'GET') {
+    var dCode = (parsed.query.code || '').toUpperCase();
+    getSubscriber(dCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+      var sellerId      = sub.amazonSellerId || AMAZON_SELLER_ID;
+      var asin = parsed.query.asin || '0525559477';
+      var sku  = 'debug-validate-' + Date.now();
+      getAmazonAccessToken(function(err, accessToken){
+        if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
+        var body = buildAmazonListingBody({
+          asin: asin,
+          marketplaceId: marketplaceId,
+          conditionLabel: parsed.query.condition || 'Good',
+          price: parsed.query.price || 8.99,
+          shippingGroup: sub.amazonShippingGroup || null
+        });
+        var path = '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku)
+                 + '?marketplaceIds=' + marketplaceId
+                 + '&mode=VALIDATION_PREVIEW'
+                 + '&issueLocale=en_US';
+        console.log('Amazon VALIDATE path:', path);
+        console.log('Amazon VALIDATE body:', body);
+        var amzReq = https.request({
+          hostname: 'sellingpartnerapi-na.amazon.com',
+          path: path,
+          method: 'PUT',
+          headers: {
+            'Content-Type':      'application/json',
+            'x-amz-access-token': accessToken,
+            'Content-Length':     Buffer.byteLength(body)
+          }
+        }, function(amzRes){
+          var amzData = '';
+          amzRes.on('data', function(c){ amzData += c; });
+          amzRes.on('end', function(){
+            console.log('Amazon VALIDATE response:', amzRes.statusCode, amzData);
+            var json; try { json = JSON.parse(amzData); } catch(e){ json = { raw: amzData }; }
+            res.writeHead(200);
+            res.end(JSON.stringify({ status: amzRes.statusCode, response: json, sentBody: JSON.parse(body) }, null, 2));
+          });
+        });
+        amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        amzReq.setTimeout(30000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+        amzReq.write(body); amzReq.end();
+      });
+    });
+    return;
+  }
+
+  // ── Warehouse: List item on Amazon ──
   if (pathname === '/warehouse/list-amazon' && req.method === 'POST') {
     parseBody(req, function(err, data) {
       var code = (data.code || '').toUpperCase();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
         var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
-        var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+        var sellerId      = sub.amazonSellerId || AMAZON_SELLER_ID;
 
         getAmazonAccessToken(function(err, accessToken){
           if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
 
-          var sku = (data.sku || '').toString();
+          var sku  = (data.sku || '').toString();
           var asin = (data.asin || '').toString();
-          var price = parseFloat(data.price);
-          if(!isFinite(price) || price <= 0) price = 9.99;
 
-          // Amazon SP-API offer-only listings require ASIN, not ISBN.
-          // The frontend should already have ASIN from the catalog lookup step.
           if(!asin){
             res.writeHead(200);
             res.end(JSON.stringify({ error: 'ASIN required to list on Amazon (run catalog lookup first).' }));
@@ -1605,45 +1690,21 @@ var server = http.createServer(function(req, res) {
             return;
           }
 
-          // Map frontend condition label -> Amazon SP-API condition value (lowercase_underscore format)
-          var conditionMap = {
-            'New':        'new_new',
-            'Like New':   'used_like_new',
-            'Very Good':  'used_very_good',
-            'Good':       'used_good',
-            'Acceptable': 'used_acceptable'
-          };
-          var conditionValue = conditionMap[data.conditionLabel] || 'used_good';
-
-          // Minimal offer-only listing payload. Keep attributes lean — fewer fields = fewer InvalidInput risks.
-          var attributes = {
-            merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
-            condition_type:          [{ value: conditionValue, marketplace_id: marketplaceId }],
-            fulfillment_availability:[{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
-            purchasable_offer: [{
-              marketplace_id: marketplaceId,
-              currency: 'USD',
-              our_price: [{ schedule: [{ value_with_tax: price }] }]
-            }]
-          };
-
-          // Only send merchant_shipping_group if the subscriber has configured a real template name.
-          // The value must match an existing shipping template in their Seller Central exactly.
-          if(sub.amazonShippingGroup){
-            attributes.merchant_shipping_group = [{ value: sub.amazonShippingGroup, marketplace_id: marketplaceId }];
-          }
-
-          var body = JSON.stringify({
-            productType:  'PRODUCT',
-            requirements: 'LISTING_OFFER_ONLY',
-            attributes:   attributes
+          var body = buildAmazonListingBody({
+            asin: asin,
+            marketplaceId: marketplaceId,
+            conditionLabel: data.conditionLabel,
+            price: data.price,
+            shippingGroup: sub.amazonShippingGroup || null
           });
 
           console.log('Amazon PUT body:', body);
 
-          var opts = {
+          var reqOpts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku)
+                + '?marketplaceIds=' + marketplaceId
+                + '&issueLocale=en_US',
             method: 'PUT',
             headers: {
               'Content-Type':      'application/json',
@@ -1652,7 +1713,7 @@ var server = http.createServer(function(req, res) {
             }
           };
 
-          var amzReq = https.request(opts, function(amzRes){
+          var amzReq = https.request(reqOpts, function(amzRes){
             var amzData = '';
             amzRes.on('data', function(c){ amzData += c; });
             amzRes.on('end', function(){
@@ -1665,7 +1726,7 @@ var server = http.createServer(function(req, res) {
                 return;
               }
 
-              // Success paths: status ACCEPTED (async) or a 2xx HTTP
+              // Success
               if(json.status === 'ACCEPTED' || amzRes.statusCode === 200 || amzRes.statusCode === 201){
                 res.writeHead(200);
                 res.end(JSON.stringify({
@@ -1677,7 +1738,7 @@ var server = http.createServer(function(req, res) {
                 return;
               }
 
-              // Error path: surface attribute-level issues[] first, then request-level errors[]
+              // Failure: surface issues[] (attribute-level) first, then errors[] (request-level)
               var issuesList = (json.issues || []).map(function(iss){
                 var names = iss.attributeNames ? iss.attributeNames.join(',') + ': '
                           : (iss.attributeName ? iss.attributeName + ': ' : '');
@@ -1693,13 +1754,8 @@ var server = http.createServer(function(req, res) {
             });
           });
 
-          amzReq.on('error', function(e){
-            res.writeHead(200); res.end(JSON.stringify({ error: 'Network error: ' + e.message }));
-          });
-          amzReq.setTimeout(30000, function(){
-            amzReq.destroy();
-            res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon request timeout' }));
-          });
+          amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Network error: ' + e.message })); });
+          amzReq.setTimeout(30000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon request timeout' })); });
           amzReq.write(body); amzReq.end();
         });
       });
