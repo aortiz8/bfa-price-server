@@ -1417,23 +1417,49 @@ var server = http.createServer(function(req, res) {
           + '</ItemSpecifics>'
           + '</Item>'
           + '</AddItemRequest>';
-        callEbayApi('AddItem', xml, userToken, devId, function(err, result) {
-          if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-          var itemId = result.ItemID || null;
-          // Update warehouse item with eBay listing ID
-          if(itemId && data.itemId){
-            connectMongo(function(err, database){
-              if(database){
-                var mongodb = require('mongodb');
-                database.collection('warehouse_inventory').updateOne(
-                  { _id: new mongodb.ObjectId(data.itemId) },
-                  { $set: { ebayItemId: itemId }, $push: { listedOn: 'ebay' } }
-                ).catch(function(){});
-              }
-            });
+        var ebayOpts = {
+          hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+          headers: {
+            'X-EBAY-API-SITEID': '0', 'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+            'X-EBAY-API-CALL-NAME': 'AddItem', 'X-EBAY-API-DEV-NAME': devId,
+            'X-EBAY-API-APP-NAME': (sub.ebayClientId || CLIENT_ID),
+            'X-EBAY-API-CERT-NAME': (sub.ebayClientSecret || CLIENT_SECRET),
+            'Content-Type': 'text/xml', 'Content-Length': Buffer.byteLength(xml)
           }
-          res.writeHead(200); res.end(JSON.stringify({ success: true, ebayItemId: itemId }));
+        };
+        var ebayReq = https.request(ebayOpts, function(ebayRes) {
+          var ebayData = '';
+          ebayRes.on('data', function(c){ ebayData += c; });
+          ebayRes.on('end', function(){
+            console.log('Warehouse eBay response:', ebayData.substring(0,500));
+            var idMatch = ebayData.match(/<ItemID>(\d+)<\/ItemID>/);
+            var errMatch = ebayData.match(/<LongMessage>(.*?)<\/LongMessage>/);
+            if(idMatch){
+              var ebayItemId = idMatch[1];
+              if(data.itemId){
+                connectMongo(function(err, database){
+                  if(database){
+                    var mongodb = require('mongodb');
+                    try {
+                      database.collection('warehouse_inventory').updateOne(
+                        { _id: new mongodb.ObjectId(data.itemId) },
+                        { $set: { ebayItemId: ebayItemId }, $push: { listedOn: 'ebay' } }
+                      ).catch(function(){});
+                    } catch(e){}
+                  }
+                });
+              }
+              res.writeHead(200); res.end(JSON.stringify({ success: true, ebayItemId: ebayItemId }));
+            } else {
+              var errMsg = errMatch ? errMatch[1] : 'Unknown eBay error';
+              res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
+            }
+          });
         });
+        ebayReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        ebayReq.setTimeout(30000, function(){ ebayReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+        ebayReq.write(xml);
+        ebayReq.end();
       });
     });
     return;
