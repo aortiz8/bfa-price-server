@@ -1470,9 +1470,11 @@ var server = http.createServer(function(req, res) {
     if(!isbn){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing ISBN' })); return; }
     getAmazonAccessToken(function(err, accessToken){
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
+      // ISBN-13 uses EAN identifier type, ISBN-10 uses ISBN
+      var identifierType = isbn.length === 13 ? 'EAN' : 'ISBN';
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifierType=ISBN&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
+        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifierType=' + identifierType + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
         method: 'GET',
         headers: {
           'x-amz-access-token': accessToken,
@@ -1497,8 +1499,11 @@ var server = http.createServer(function(req, res) {
             // Extract all useful fields
             var title = (attrs.item_name && attrs.item_name[0] && attrs.item_name[0].value) || summaries.itemName || '';
             var author = '';
-            if(attrs.contributor){ attrs.contributor.forEach(function(c){ if(c.role && c.role.value && c.role.value.toLowerCase().indexOf('author')>-1) author = c.value || ''; }); }
+            if(attrs.contributor){ attrs.contributor.forEach(function(c){ if(!author && c.value) author = c.value; }); }
             if(!author && attrs.author) author = (attrs.author[0] && attrs.author[0].value) || '';
+            if(!author && attrs.brand) author = (attrs.brand[0] && attrs.brand[0].value) || '';
+            if(!author && summaries.author) author = summaries.author;
+            if(!author) author = 'Unknown';
             var publisher = (attrs.publisher && attrs.publisher[0] && attrs.publisher[0].value) || '';
             var pubDate = (attrs.publication_date && attrs.publication_date[0] && attrs.publication_date[0].value) || '';
             var year = pubDate ? pubDate.substring(0,4) : '';
@@ -1672,7 +1677,6 @@ var server = http.createServer(function(req, res) {
           + '<ItemSpecifics>'
           + '<NameValueList><n>Book Title</n><Value>' + esc(data.bookTitle || data.title || '').substring(0,65) + '</Value></NameValueList>'
           + '<NameValueList><n>Author</n><Value>' + esc(data.author || 'Unknown').substring(0,65) + '</Value></NameValueList>'
-          + (data.isbn ? '<NameValueList><n>ISBN</n><Value>' + esc(data.isbn) + '</Value></NameValueList>' : '')
           + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
           + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
           + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
