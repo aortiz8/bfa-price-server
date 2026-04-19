@@ -1802,7 +1802,7 @@ var server = http.createServer(function(req, res) {
           var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
           var body = JSON.stringify({
             productType: 'PRODUCT',
-            requirement: 'LISTING_OFFER_ONLY',
+            requirements: 'LISTING_OFFER_ONLY',
             attributes: {
               merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
