@@ -1580,9 +1580,10 @@ var server = http.createServer(function(req, res) {
     var asin = parsed.query.asin || '0525559477';
     getAmazonAccessToken(function(err, accessToken){
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+      console.log('Using AMAZON_SELLER_ID:', AMAZON_SELLER_ID);
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/listings/2021-08-01/restrictions?asin=' + asin + '&sellerId=' + encodeURIComponent(AMAZON_SELLER_ID) + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&conditionType=used_good',
+        path: '/listings/2021-08-01/restrictions?asin=' + asin + '&sellerId=' + AMAZON_SELLER_ID + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&conditionType=used_good',
         method: 'GET',
         headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
       };
@@ -1646,7 +1647,7 @@ var server = http.createServer(function(req, res) {
       });
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/listings/2021-08-01/items/' + encodeURIComponent(AMAZON_SELLER_ID) + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID,
+        path: '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID,
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -1682,7 +1683,7 @@ var server = http.createServer(function(req, res) {
           var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(data.sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(data.sku) + '?marketplaceIds=' + marketplaceId,
             method: 'DELETE',
             headers: { 'x-amz-access-token': accessToken }
           };
@@ -1752,7 +1753,7 @@ var server = http.createServer(function(req, res) {
           var encodedSku = encodeURIComponent(encodeURIComponent(sku));
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodedSku + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodedSku + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
