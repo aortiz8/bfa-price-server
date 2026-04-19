@@ -1592,13 +1592,19 @@ var server = http.createServer(function(req, res) {
           var price = parseFloat(data.price || 9.99).toFixed(2);
           var conditionMap = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
           var condition = conditionMap[data.conditionLabel] || 'used_good';
-          // For used books, we match against existing Amazon ASIN
-          // The correct body format for Listings Items API
+          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+
+          // Amazon requires ASIN to match catalog for used books
+          // We use the ASIN from our catalog lookup
+          var asin = data.asin || '';
+          if(!asin){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ASIN available — cannot list on Amazon without catalog match' })); return; }
+
           var body = JSON.stringify({
             productType: 'BOOK',
+            requirements: 'LISTING_OFFER_ONLY',
             attributes: {
+              merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition, marketplace_id: marketplaceId }],
-              item_condition: [{ value: condition, marketplace_id: marketplaceId }],
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
                 currency: 'USD',
@@ -1612,7 +1618,6 @@ var server = http.createServer(function(req, res) {
             }
           });
           console.log('Amazon listing body:', body);
-          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
             path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
