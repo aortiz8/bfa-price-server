@@ -15,6 +15,48 @@ var SENDGRID_KEY = process.env.SENDGRID_KEY || '';
 var MONGODB_URI = (process.env.MONGODB_URI || 'mongodb+srv://booksforagesbookmobile_db_user:nkBsVNFyqDEUGWQv@booksforages.w8exzl5.mongodb.net/booksforages?retryWrites=true&w=majority&appName=booksforages').replace(/[\r\n]/g,'').trim();
 var ADMIN_KEY = (process.env.ADMIN_KEY || 'Booksforages1!').replace(/[\r\n]/g,'').trim();
 
+// Amazon SP-API credentials
+var AMAZON_CLIENT_ID = process.env.AMAZON_CLIENT_ID || '';
+var AMAZON_CLIENT_SECRET = process.env.AMAZON_CLIENT_SECRET || '';
+var AMAZON_REFRESH_TOKEN = process.env.AMAZON_REFRESH_TOKEN || '';
+var AMAZON_MARKETPLACE_ID = 'ATVPDKIKX0DER'; // US marketplace
+
+// Amazon access token cache
+var amazonTokenCache = null;
+var amazonTokenExpiry = 0;
+
+function getAmazonAccessToken(cb){
+  // Return cached token if still valid
+  if(amazonTokenCache && Date.now() < amazonTokenExpiry){
+    cb(null, amazonTokenCache); return;
+  }
+  var body = 'grant_type=refresh_token'
+    + '&refresh_token=' + encodeURIComponent(AMAZON_REFRESH_TOKEN)
+    + '&client_id=' + encodeURIComponent(AMAZON_CLIENT_ID)
+    + '&client_secret=' + encodeURIComponent(AMAZON_CLIENT_SECRET);
+  var opts = {
+    hostname: 'api.amazon.com', path: '/auth/o2/token', method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) }
+  };
+  var req = https.request(opts, function(res){
+    var data = '';
+    res.on('data', function(c){ data += c; });
+    res.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.access_token){
+          amazonTokenCache = json.access_token;
+          amazonTokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
+          cb(null, json.access_token);
+        } else { cb('Amazon token error: ' + data); }
+      } catch(e){ cb('Amazon token parse error'); }
+    });
+  });
+  req.on('error', function(e){ cb(e.message); });
+  req.setTimeout(10000, function(){ req.destroy(); cb('Timeout'); });
+  req.write(body); req.end();
+}
+
 // MongoDB connection
 var db = null;
 var mongoClient = null;
@@ -1414,6 +1456,70 @@ var server = http.createServer(function(req, res) {
           })
           .then(function(){ res.writeHead(200); res.end(JSON.stringify({ success: true })); })
           .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        });
+      });
+    });
+    return;
+  }
+
+  // ── Warehouse: List item on Amazon ──
+  if (pathname === '/warehouse/list-amazon' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      getSubscriber(code, function(err, sub) {
+        if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        var clientId = sub.amazonClientId || AMAZON_CLIENT_ID;
+        var clientSecret = sub.amazonClientSecret || AMAZON_CLIENT_SECRET;
+        var refreshToken = sub.amazonRefreshToken || AMAZON_REFRESH_TOKEN;
+        var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+        // Get Amazon access token
+        getAmazonAccessToken(function(err, accessToken){
+          if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
+          // Build listing payload
+          var sku = data.sku || '';
+          var price = parseFloat(data.price || 9.99).toFixed(2);
+          var conditionMap = {'New':'New','Like New':'UsedLikeNew','Very Good':'UsedVeryGood','Good':'UsedGood','Acceptable':'UsedAcceptable'};
+          var condition = conditionMap[data.conditionLabel] || 'UsedGood';
+          // Use ISBN to match existing Amazon catalog listing
+          var body = JSON.stringify({
+            productType: 'BOOK',
+            attributes: {
+              merchant_suggested_asin: data.isbn ? [{ value: data.isbn }] : undefined,
+              condition_type: [{ value: condition, marketplace_id: marketplaceId }],
+              list_price: [{ value: parseFloat(price), currency: 'USD', marketplace_id: marketplaceId }],
+              purchasable_offer: [{ currency: 'USD', our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }], marketplace_id: marketplaceId }],
+              merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: marketplaceId }]
+            }
+          });
+          var opts = {
+            hostname: 'sellingpartnerapi-na.amazon.com',
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sub.amazonSellerId || '') + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-amz-access-token': accessToken,
+              'Content-Length': Buffer.byteLength(body)
+            }
+          };
+          var amzReq = https.request(opts, function(amzRes){
+            var amzData = '';
+            amzRes.on('data', function(c){ amzData += c; });
+            amzRes.on('end', function(){
+              console.log('Amazon listing response:', amzRes.statusCode, amzData.substring(0,500));
+              try {
+                var json = JSON.parse(amzData);
+                if(amzRes.statusCode === 200 || amzRes.statusCode === 201){
+                  res.writeHead(200); res.end(JSON.stringify({ success: true, asin: json.asin || null }));
+                } else {
+                  var errMsg = (json.errors && json.errors[0] && json.errors[0].message) || amzData;
+                  res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
+                }
+              } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: amzData })); }
+            });
+          });
+          amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          amzReq.setTimeout(30000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+          amzReq.write(body); amzReq.end();
         });
       });
     });
