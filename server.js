@@ -1372,6 +1372,123 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Warehouse: List item on eBay LIVE (no schedule) ──
+  if (pathname === '/warehouse/list-ebay' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      getSubscriber(code, function(err, sub) {
+        if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        var userToken = sub.ebayUserToken || USER_TOKEN;
+        var devId = sub.ebayDevId || DEV_ID;
+        var shippingPolicyId = sub.ebayShippingPolicyId || '193108528015';
+        var paymentPolicyId = sub.ebayPaymentPolicyId || '226293158015';
+        var returnPolicyId = sub.ebayReturnPolicyId || '129856789015';
+        var conditionId = data.conditionId || 5000;
+        var desc = cleanDescription(data.description || '');
+        var xml = '<?xml version="1.0" encoding="utf-8"?>'
+          + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+          + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
+          + '<Item>'
+          + '<Title>' + esc(data.title || '').substring(0,80) + '</Title>'
+          + '<Description><![CDATA[' + desc + ']]></Description>'
+          + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
+          + '<StartPrice>' + parseFloat(data.price || 9.99).toFixed(2) + '</StartPrice>'
+          + '<ConditionID>' + conditionId + '</ConditionID>'
+          + '<Country>US</Country>'
+          + '<Location>United States</Location>'
+          + '<Currency>USD</Currency>'
+          + '<DispatchTimeMax>2</DispatchTimeMax>'
+          + '<ListingDuration>GTC</ListingDuration>'
+          + '<ListingType>FixedPriceItem</ListingType>'
+          + '<SKU>' + esc(data.sku || '') + '</SKU>'
+          + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
+          + '<SellerProfiles>'
+          + '<SellerShippingProfile><ShippingProfileID>' + shippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
+          + '<SellerReturnProfile><ReturnProfileID>' + returnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
+          + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
+          + '</SellerProfiles>'
+          + '<ItemSpecifics>'
+          + '<NameValueList><n>Book Title</n><Value>' + esc(data.bookTitle || data.title || '').substring(0,65) + '</Value></NameValueList>'
+          + '<NameValueList><n>Author</n><Value>' + esc(data.author || 'Unknown').substring(0,65) + '</Value></NameValueList>'
+          + (data.isbn ? '<NameValueList><n>ISBN</n><Value>' + esc(data.isbn) + '</Value></NameValueList>' : '')
+          + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
+          + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
+          + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
+          + '</ItemSpecifics>'
+          + '</Item>'
+          + '</AddItemRequest>';
+        callEbayApi('AddItem', xml, userToken, devId, function(err, result) {
+          if (err) { res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+          var itemId = result.ItemID || null;
+          // Update warehouse item with eBay listing ID
+          if(itemId && data.itemId){
+            connectMongo(function(err, database){
+              if(database){
+                var mongodb = require('mongodb');
+                database.collection('warehouse_inventory').updateOne(
+                  { _id: new mongodb.ObjectId(data.itemId) },
+                  { $set: { ebayItemId: itemId }, $push: { listedOn: 'ebay' } }
+                ).catch(function(){});
+              }
+            });
+          }
+          res.writeHead(200); res.end(JSON.stringify({ success: true, ebayItemId: itemId }));
+        });
+      });
+    });
+    return;
+  }
+
+  // ── Warehouse: Get map fill data ──
+  if (pathname === '/warehouse/map' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ fills: {} })); return; }
+      // Get subscriber warehouse config for capacity
+      getSubscriber(code, function(err, sub){
+        var config = (sub && sub.warehouseConfig) || { inchesPerSection: 366, defaultBookWidthInches: 1.2 };
+        database.collection('warehouse_inventory').find({ code: code, status: 'active' }).toArray()
+        .then(function(items){
+          var fills = {};
+          items.forEach(function(item){
+            if(!item.location) return;
+            var key = item.location.row + '-' + item.location.section;
+            if(!fills[key]) fills[key] = { used: 0, capacity: config.inchesPerSection, count: 0 };
+            fills[key].used += parseFloat(item.widthInches || config.defaultBookWidthInches || 1.2);
+            fills[key].count++;
+          });
+          res.writeHead(200); res.end(JSON.stringify({ fills: fills }));
+        })
+        .catch(function(){ res.writeHead(200); res.end(JSON.stringify({ fills: {} })); });
+      });
+    });
+    return;
+  }
+
+  // ── Warehouse: Get next location sequence ──
+  if (pathname === '/warehouse/next-location' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var row = parseInt(parsed.query.row || '1');
+    var section = parsed.query.section || 'A';
+    if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
+    connectMongo(function(err, database) {
+      if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ row: row, section: section, sequence: 1 })); return; }
+      // Find highest sequence number for this row+section
+      database.collection('warehouse_inventory').find({
+        code: code,
+        'location.row': row,
+        'location.section': section
+      }).sort({ 'location.sequence': -1 }).limit(1).toArray()
+      .then(function(items){
+        var nextSeq = items.length > 0 ? (items[0].location.sequence + 1) : 1;
+        res.writeHead(200); res.end(JSON.stringify({ row: row, section: section, sequence: nextSeq }));
+      })
+      .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ row: row, section: section, sequence: 1 })); });
+    });
+    return;
+  }
+
   // ── Warehouse: Save item to inventory ──
   if (pathname === '/warehouse/item' && req.method === 'POST') {
     parseBody(req, function(err, data) {
