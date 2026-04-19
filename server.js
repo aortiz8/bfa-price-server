@@ -1645,6 +1645,58 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Debug: Test Amazon listing in VALIDATION_PREVIEW mode ──
+  if (pathname === '/warehouse/test-amazon-validate' && req.method === 'GET') {
+    var testAsin = parsed.query.asin || '0525559477';
+    var testSku = 'test-validate-' + Date.now();
+    getAmazonAccessToken(function(err, accessToken){
+      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+      var body = JSON.stringify({
+        productType: 'PRODUCT',
+        requirements: 'LISTING_OFFER_ONLY',
+        attributes: {
+          merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
+          condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
+          purchasable_offer: [{
+            marketplace_id: AMAZON_MARKETPLACE_ID,
+            currency: 'USD',
+            our_price: [{ schedule: [{ value_with_tax: 8.99 }] }]
+          }],
+          fulfillment_availability: [{
+            fulfillment_channel_code: 'DEFAULT',
+            quantity: 1,
+            marketplace_id: AMAZON_MARKETPLACE_ID
+          }]
+        }
+      });
+      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&issueLocale=en_US&mode=VALIDATION_PREVIEW';
+      console.log('Validation path:', path);
+      console.log('Validation body:', body);
+      var opts = {
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: path,
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-amz-access-token': accessToken,
+          'Content-Length': Buffer.byteLength(body)
+        }
+      };
+      var amzReq = https.request(opts, function(amzRes){
+        var amzData = '';
+        amzRes.on('data', function(c){ amzData += c; });
+        amzRes.on('end', function(){
+          console.log('Validation response:', amzRes.statusCode, amzData);
+          res.writeHead(200); res.end(JSON.stringify({ status: amzRes.statusCode, response: JSON.parse(amzData || '{}') }));
+        });
+      });
+      amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      amzReq.setTimeout(15000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+      amzReq.write(body); amzReq.end();
+    });
+    return;
+  }
+
   // ── Debug: Test Amazon listing directly ──
   if (pathname === '/warehouse/test-amazon-list' && req.method === 'GET') {
     var testAsin = parsed.query.asin || '0525559477';
