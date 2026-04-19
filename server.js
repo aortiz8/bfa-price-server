@@ -1474,7 +1474,7 @@ var server = http.createServer(function(req, res) {
       var identifierType = isbn.length === 13 ? 'EAN' : 'ISBN';
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifierType=' + identifierType + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
+        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifiersType=' + identifierType + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
         method: 'GET',
         headers: {
           'x-amz-access-token': accessToken,
