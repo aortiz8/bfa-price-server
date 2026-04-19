@@ -1588,25 +1588,34 @@ var server = http.createServer(function(req, res) {
         // Get Amazon access token
         getAmazonAccessToken(function(err, accessToken){
           if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
-          // Build listing payload
           var sku = data.sku || '';
           var price = parseFloat(data.price || 9.99).toFixed(2);
-          var conditionMap = {'New':'New','Like New':'UsedLikeNew','Very Good':'UsedVeryGood','Good':'UsedGood','Acceptable':'UsedAcceptable'};
-          var condition = conditionMap[data.conditionLabel] || 'UsedGood';
-          // Use ISBN to match existing Amazon catalog listing
+          var conditionMap = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
+          var condition = conditionMap[data.conditionLabel] || 'used_good';
+          // For used books, we match against existing Amazon ASIN
+          // The correct body format for Listings Items API
           var body = JSON.stringify({
             productType: 'BOOK',
             attributes: {
-              merchant_suggested_asin: data.isbn ? [{ value: data.isbn }] : undefined,
               condition_type: [{ value: condition, marketplace_id: marketplaceId }],
-              list_price: [{ value: parseFloat(price), currency: 'USD', marketplace_id: marketplaceId }],
-              purchasable_offer: [{ currency: 'USD', our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }], marketplace_id: marketplaceId }],
-              merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: marketplaceId }]
+              item_condition: [{ value: condition, marketplace_id: marketplaceId }],
+              purchasable_offer: [{
+                marketplace_id: marketplaceId,
+                currency: 'USD',
+                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
+              }],
+              fulfillment_availability: [{
+                fulfillment_channel_code: 'DEFAULT',
+                quantity: 1,
+                marketplace_id: marketplaceId
+              }]
             }
           });
+          console.log('Amazon listing body:', body);
+          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sub.amazonSellerId || AMAZON_SELLER_ID) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
@@ -1618,7 +1627,7 @@ var server = http.createServer(function(req, res) {
             var amzData = '';
             amzRes.on('data', function(c){ amzData += c; });
             amzRes.on('end', function(){
-              console.log('Amazon listing response:', amzRes.statusCode, amzData.substring(0,500));
+              console.log('Amazon listing response:', amzRes.statusCode, amzData);
               try {
                 var json = JSON.parse(amzData);
                 if(amzRes.statusCode === 200 || amzRes.statusCode === 201){
