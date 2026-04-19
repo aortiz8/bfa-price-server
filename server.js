@@ -1603,7 +1603,7 @@ var server = http.createServer(function(req, res) {
     getAmazonAccessToken(function(err, accessToken){
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
       console.log('Using AMAZON_SELLER_ID:', AMAZON_SELLER_ID);
-      var restrictionsPath = '/listings/2021-08-01/restrictions?asin=' + asin + '&sellerId=' + AMAZON_SELLER_ID + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&conditionType=used_good';
+      var restrictionsPath = '/listings/2021-08-01/restrictions?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&sellerId=' + AMAZON_SELLER_ID + '&asin=' + asin + '&conditionType=used_good';
       console.log('Restrictions path:', restrictionsPath);
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
@@ -1773,11 +1773,9 @@ var server = http.createServer(function(req, res) {
             }
           });
           console.log('Amazon listing body:', body);
-          // Double-encode SKU to handle dots and special chars safely
-          var encodedSku = encodeURIComponent(encodeURIComponent(sku));
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodedSku + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId + '&issueLocale=en_US',
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
