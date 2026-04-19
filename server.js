@@ -1683,8 +1683,8 @@ var server = http.createServer(function(req, res) {
           + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
           + '</SellerProfiles>'
           + '<ItemSpecifics>'
-          + '<NameValueList><n>Book Title</n><Value>' + esc(data.bookTitle || data.title || '').substring(0,65) + '</Value></NameValueList>'
-          + '<NameValueList><n>Author</n><Value>' + esc(data.author || 'Unknown').substring(0,65) + '</Value></NameValueList>'
+          + '<NameValueList><n>Book Title</n><Value>' + esc((data.bookTitle || data.title || '').replace(/^—+$/, '').substring(0,65) || 'See description') + '</Value></NameValueList>'
+          + '<NameValueList><n>Author</n><Value>' + esc((data.author || 'Unknown').replace(/^—+$/, '') || 'Unknown').substring(0,65) + '</Value></NameValueList>'
           + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
           + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
           + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
