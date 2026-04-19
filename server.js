@@ -20,7 +20,7 @@ var AMAZON_CLIENT_ID = process.env.AMAZON_CLIENT_ID || '';
 var AMAZON_CLIENT_SECRET = process.env.AMAZON_CLIENT_SECRET || '';
 var AMAZON_REFRESH_TOKEN = process.env.AMAZON_REFRESH_TOKEN || '';
 var AMAZON_MARKETPLACE_ID = 'ATVPDKIKX0DER'; // US marketplace
-var AMAZON_SELLER_ID = process.env.AMAZON_SELLER_ID || 'ACH3QS6GNTU3L';
+var AMAZON_SELLER_ID = process.env.AMAZON_SELLER_ID || 'A1A1G57C14ORT4';
 
 // Amazon access token cache
 var amazonTokenCache = null;
