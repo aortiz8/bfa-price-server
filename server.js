@@ -1660,7 +1660,12 @@ var server = http.createServer(function(req, res) {
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
                 currency: 'USD',
-                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
+                our_price: [{
+                  schedule: [{
+                    value_with_tax: parseFloat(price),
+                    start_at: { value: new Date().toISOString() }
+                  }]
+                }]
               }],
               fulfillment_availability: [{
                 fulfillment_channel_code: 'DEFAULT',
@@ -1670,9 +1675,11 @@ var server = http.createServer(function(req, res) {
             }
           });
           console.log('Amazon listing body:', body);
+          // Double-encode SKU to handle dots and special chars safely
+          var encodedSku = encodeURIComponent(encodeURIComponent(sku));
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodedSku + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
