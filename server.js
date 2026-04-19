@@ -1657,7 +1657,7 @@ var server = http.createServer(function(req, res) {
         attributes: {
           merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
           condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
-          merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: AMAZON_MARKETPLACE_ID }],
+          merchant_shipping_group: [{ value: 'Base shipping - standard', marketplace_id: AMAZON_MARKETPLACE_ID }],
           fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
           purchasable_offer: [{
             marketplace_id: AMAZON_MARKETPLACE_ID,
@@ -1800,15 +1800,13 @@ var server = http.createServer(function(req, res) {
 
           var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
           var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
-
-          // Exact format from Amazon SP-API documentation
           var body = JSON.stringify({
             productType: 'PRODUCT',
             requirement: 'LISTING_OFFER_ONLY',
             attributes: {
               merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
-              merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: marketplaceId }],
+              merchant_shipping_group: [{ value: 'Base shipping - standard', marketplace_id: marketplaceId }],
               fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
