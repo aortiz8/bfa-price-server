@@ -1575,6 +1575,36 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Warehouse: Delete Amazon listing (rollback) ──
+  if (pathname === '/warehouse/delete-amazon' && req.method === 'POST') {
+    parseBody(req, function(err, data) {
+      var code = (data.code || '').toUpperCase();
+      getSubscriber(code, function(err, sub){
+        if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+        getAmazonAccessToken(function(err, accessToken){
+          if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+          var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+          var opts = {
+            hostname: 'sellingpartnerapi-na.amazon.com',
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(data.sku) + '?marketplaceIds=' + marketplaceId,
+            method: 'DELETE',
+            headers: { 'x-amz-access-token': accessToken }
+          };
+          var amzReq = https.request(opts, function(amzRes){
+            var d=''; amzRes.on('data',function(c){d+=c;}); amzRes.on('end',function(){
+              console.log('Amazon rollback response:', amzRes.statusCode, d.substring(0,200));
+              res.writeHead(200); res.end(JSON.stringify({ success: true }));
+            });
+          });
+          amzReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          amzReq.end();
+        });
+      });
+    });
+    return;
+  }
+
   // ── Warehouse: List item on Amazon ──
   if (pathname === '/warehouse/list-amazon' && req.method === 'POST') {
     parseBody(req, function(err, data) {
@@ -1600,7 +1630,8 @@ var server = http.createServer(function(req, res) {
           if(!asin){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ASIN available — cannot list on Amazon without catalog match' })); return; }
 
           var body = JSON.stringify({
-            productType: 'BOOK',
+            productType: 'PRODUCT',
+            requirements: 'LISTING_OFFER_ONLY',
             attributes: {
               merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
               condition_type: [{ value: condition, marketplace_id: marketplaceId }],
@@ -1619,7 +1650,7 @@ var server = http.createServer(function(req, res) {
           console.log('Amazon listing body:', body);
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId + '&requirements=LISTING_OFFER_ONLY',
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
