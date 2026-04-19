@@ -1575,6 +1575,28 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Debug: Get Amazon product type requirements ──
+  if (pathname === '/warehouse/amazon-requirements' && req.method === 'GET') {
+    getAmazonAccessToken(function(err, accessToken){
+      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+      var opts = {
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: '/definitions/2020-09-01/productTypes/PRODUCT?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&requirements=LISTING_OFFER_ONLY',
+        method: 'GET',
+        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
+      };
+      var req2 = https.request(opts, function(res2){
+        var data = ''; res2.on('data',function(c){data+=c;}); res2.on('end',function(){
+          console.log('Amazon requirements:', res2.statusCode, data.substring(0,1000));
+          res.writeHead(200); res.end(data);
+        });
+      });
+      req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
+      req2.end();
+    });
+    return;
+  }
+
   // ── Warehouse: Delete Amazon listing (rollback) ──
   if (pathname === '/warehouse/delete-amazon' && req.method === 'POST') {
     parseBody(req, function(err, data) {
