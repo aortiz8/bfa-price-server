@@ -1612,6 +1612,86 @@ var server = http.createServer(function(req, res) {
     });
   }
 
+  // ── Debug: Amazon auth + listings scope check ──
+  // Tests whether the current refresh token actually has the Product Listing scope.
+  // Hit: /warehouse/debug-amazon-auth?code=XXX&asin=0525559477
+  if (pathname === '/warehouse/debug-amazon-auth' && req.method === 'GET') {
+    var aCode = (parsed.query.code || '').toUpperCase();
+    getSubscriber(aCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+      var sellerId      = sub.amazonSellerId || AMAZON_SELLER_ID;
+      var testAsin      = parsed.query.asin || '0525559477';
+
+      getAmazonAccessToken(function(err, accessToken){
+        if(err){
+          res.writeHead(200);
+          res.end(JSON.stringify({ step: 'token_mint', ok: false, error: err }));
+          return;
+        }
+
+        // Call getListingsRestrictions — requires the same scope as putListingsItem.
+        // If this fails with 403, the refresh token definitely lacks the Product Listing scope.
+        // If this returns 200 (even with empty restrictions), scope is fine.
+        var rPath = '/listings/2021-08-01/restrictions'
+                  + '?asin=' + encodeURIComponent(testAsin)
+                  + '&conditionType=used_good'
+                  + '&sellerId=' + encodeURIComponent(sellerId)
+                  + '&marketplaceIds=' + marketplaceId;
+
+        var rReq = https.request({
+          hostname: 'sellingpartnerapi-na.amazon.com',
+          path: rPath,
+          method: 'GET',
+          headers: {
+            'x-amz-access-token': accessToken,
+            'Accept': 'application/json'
+          }
+        }, function(rRes){
+          var rData = '';
+          rRes.on('data', function(c){ rData += c; });
+          rRes.on('end', function(){
+            var rJson; try { rJson = JSON.parse(rData); } catch(e){ rJson = { raw: rData }; }
+            console.log('Amazon AUTH CHECK:', rRes.statusCode, rData);
+
+            var diagnosis;
+            if(rRes.statusCode === 200){
+              diagnosis = 'SCOPE OK — the token has Product Listing permission. putListingsItem failing for a different reason.';
+            } else if(rRes.statusCode === 403){
+              diagnosis = 'SCOPE MISSING — the refresh token does NOT carry the Product Listing scope. Re-authorize the app in Seller Central and update AMAZON_REFRESH_TOKEN in Render.';
+            } else if(rRes.statusCode === 401){
+              diagnosis = 'AUTH FAILED — token is invalid or expired. Re-generate and update.';
+            } else if(rRes.statusCode === 400){
+              diagnosis = 'BAD REQUEST — token likely valid but request parameters rejected. Check seller ID and ASIN.';
+            } else {
+              diagnosis = 'Unexpected status ' + rRes.statusCode;
+            }
+
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              step: 'listings_restrictions_read',
+              httpStatus: rRes.statusCode,
+              diagnosis: diagnosis,
+              sellerIdUsed: sellerId,
+              marketplaceIdUsed: marketplaceId,
+              tokenFirstChars: accessToken.substring(0,12) + '...',
+              response: rJson
+            }, null, 2));
+          });
+        });
+        rReq.on('error', function(e){
+          res.writeHead(200); res.end(JSON.stringify({ step: 'network', error: e.message }));
+        });
+        rReq.setTimeout(20000, function(){
+          rReq.destroy();
+          res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' }));
+        });
+        rReq.end();
+      });
+    });
+    return;
+  }
+
   // ── Debug: Amazon VALIDATION_PREVIEW — returns real issues[] without creating a listing ──
   // Hit: /warehouse/debug-amazon-validate?code=XXX&asin=0525559477&condition=Good&price=8.99
   if (pathname === '/warehouse/debug-amazon-validate' && req.method === 'GET') {
