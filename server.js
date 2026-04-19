@@ -1575,15 +1575,39 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Debug: Get seller info from token ──
+  if (pathname === '/warehouse/check-seller' && req.method === 'GET') {
+    getAmazonAccessToken(function(err, accessToken){
+      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+      var opts = {
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: '/sellers/v1/marketplaceParticipations',
+        method: 'GET',
+        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
+      };
+      var req2 = https.request(opts, function(res2){
+        var data = ''; res2.on('data',function(c){data+=c;}); res2.on('end',function(){
+          console.log('Seller info:', res2.statusCode, data.substring(0,500));
+          res.writeHead(200); res.end(data);
+        });
+      });
+      req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
+      req2.end();
+    });
+    return;
+  }
+
   // ── Debug: Check Amazon listing restrictions for an ASIN ──
   if (pathname === '/warehouse/check-amazon-restrictions' && req.method === 'GET') {
     var asin = parsed.query.asin || '0525559477';
     getAmazonAccessToken(function(err, accessToken){
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
       console.log('Using AMAZON_SELLER_ID:', AMAZON_SELLER_ID);
+      var restrictionsPath = '/listings/2021-08-01/restrictions?asin=' + asin + '&sellerId=' + AMAZON_SELLER_ID + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&conditionType=used_good';
+      console.log('Restrictions path:', restrictionsPath);
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/listings/2021-08-01/restrictions?asin=' + asin + '&sellerId=' + AMAZON_SELLER_ID + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&conditionType=used_good',
+        path: restrictionsPath,
         method: 'GET',
         headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
       };
