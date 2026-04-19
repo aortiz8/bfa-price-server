@@ -1485,11 +1485,11 @@ var server = http.createServer(function(req, res) {
         var data = '';
         amzRes.on('data', function(c){ data += c; });
         amzRes.on('end', function(){
-          console.log('Amazon catalog response:', amzRes.statusCode, data.substring(0,800));
+          console.log('Amazon catalog FULL response:', amzRes.statusCode, data);
           try {
             var json = JSON.parse(data);
             var items = json.items || [];
-            if(!items.length){ res.writeHead(200); res.end(JSON.stringify({ error: 'Book not found in Amazon catalog' })); return; }
+            if(!items.length){ res.writeHead(200); res.end(JSON.stringify({ error: 'Book not found in Amazon catalog', rawResponse: json })); return; }
             var item = items[0];
             var attrs = item.attributes || {};
             var summaries = (item.summaries && item.summaries[0]) || {};
