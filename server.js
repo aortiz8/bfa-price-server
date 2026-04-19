@@ -1725,6 +1725,7 @@ var server = http.createServer(function(req, res) {
         headers: {
           'Content-Type': 'application/json',
           'x-amz-access-token': accessToken,
+          'x-amzn-api-version': '2021-08-01',
           'Content-Length': Buffer.byteLength(body)
         }
       };
@@ -1821,7 +1822,12 @@ var server = http.createServer(function(req, res) {
             hostname: 'sellingpartnerapi-na.amazon.com',
             path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json', 'x-amz-access-token': accessToken, 'Content-Length': Buffer.byteLength(body) }
+            headers: {
+              'Content-Type': 'application/json',
+              'x-amz-access-token': accessToken,
+              'x-amzn-api-version': '2021-08-01',
+              'Content-Length': Buffer.byteLength(body)
+            }
           };
           var amzReq = https.request(opts, function(amzRes){
             var amzData = ''; amzRes.on('data',function(c){amzData+=c;}); amzRes.on('end',function(){
