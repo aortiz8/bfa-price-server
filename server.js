@@ -1688,7 +1688,7 @@ var server = http.createServer(function(req, res) {
           + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
           + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
           + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
-          + '<NameValueList><n>Language</n><Value>' + esc(data.language || 'English') + '</Value></NameValueList>'
+          + '<NameValueList><n>Language</n><Value>' + esc(data.language && data.language.length > 1 ? data.language.charAt(0).toUpperCase() + data.language.slice(1).toLowerCase() : 'English') + '</Value></NameValueList>'
           + (data.edition ? '<NameValueList><n>Edition</n><Value>' + esc(data.edition) + '</Value></NameValueList>' : '')
           + (data.pages ? '<NameValueList><n>Number of Pages</n><Value>' + esc(String(data.pages)) + '</Value></NameValueList>' : '')
           + (data.series ? '<NameValueList><n>Series</n><Value>' + esc(data.series).substring(0,65) + '</Value></NameValueList>' : '')
@@ -1696,6 +1696,7 @@ var server = http.createServer(function(req, res) {
           + '</ItemSpecifics>'
           + '</Item>'
           + '</AddItemRequest>';
+        console.log('Warehouse eBay XML ItemSpecifics:', xml.substring(xml.indexOf('<ItemSpecifics>'), xml.indexOf('</ItemSpecifics>') + 16));
         var ebayOpts = {
           hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
           headers: {
