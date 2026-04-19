@@ -1504,13 +1504,21 @@ var server = http.createServer(function(req, res) {
             if(!author && attrs.brand) author = (attrs.brand[0] && attrs.brand[0].value) || '';
             if(!author && summaries.author) author = summaries.author;
             if(!author) author = 'Unknown';
-            var publisher = (attrs.publisher && attrs.publisher[0] && attrs.publisher[0].value) || '';
+            // Flip "Last, First" to "First Last"
+            if(author.indexOf(',') > -1){ var ap = author.split(','); author = (ap[1]||'').trim() + ' ' + (ap[0]||'').trim(); }
+            author = author.trim();
+
+            var publisher = (attrs.publisher && attrs.publisher[0] && attrs.publisher[0].value) || (summaries.manufacturer) || '';
             var pubDate = (attrs.publication_date && attrs.publication_date[0] && attrs.publication_date[0].value) || '';
             var year = pubDate ? pubDate.substring(0,4) : '';
             var language = (attrs.language && attrs.language[0] && attrs.language[0].value) || 'English';
+            // Capitalize language: "english" → "English"
+            language = language.charAt(0).toUpperCase() + language.slice(1).toLowerCase();
             var pages = (attrs.number_of_pages && attrs.number_of_pages[0] && attrs.number_of_pages[0].value) || '';
             var edition = (attrs.edition && attrs.edition[0] && attrs.edition[0].value) || '';
             var format = (attrs.binding && attrs.binding[0] && attrs.binding[0].value) || 'Paperback';
+            // Capitalize format: "hardcover" → "Hardcover"
+            format = format.charAt(0).toUpperCase() + format.slice(1).toLowerCase();
             var description = (attrs.product_description && attrs.product_description[0] && attrs.product_description[0].value) || '';
             var series = (attrs.series && attrs.series[0] && attrs.series[0].value) || '';
             var grade = (attrs.grade && attrs.grade[0] && attrs.grade[0].value) || '';
