@@ -1385,6 +1385,13 @@ var server = http.createServer(function(req, res) {
         var returnPolicyId = sub.ebayReturnPolicyId || '129856789015';
         var conditionId = data.conditionId || 5000;
         var desc = cleanDescription(data.description || '');
+
+        // Build picture URL from cover image
+        var pictureXml = '';
+        if(data.coverUrl){
+          pictureXml = '<PictureDetails><PictureURL>' + data.coverUrl + '</PictureURL></PictureDetails>';
+        }
+
         var xml = '<?xml version="1.0" encoding="utf-8"?>'
           + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
           + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
@@ -1402,6 +1409,7 @@ var server = http.createServer(function(req, res) {
           + '<ListingType>FixedPriceItem</ListingType>'
           + '<SKU>' + esc(data.sku || '') + '</SKU>'
           + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
+          + pictureXml
           + '<SellerProfiles>'
           + '<SellerShippingProfile><ShippingProfileID>' + shippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
           + '<SellerReturnProfile><ReturnProfileID>' + returnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
