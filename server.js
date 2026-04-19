@@ -1575,274 +1575,131 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
-  // ── Debug: Get seller info from token ──
-  if (pathname === '/warehouse/check-seller' && req.method === 'GET') {
-    getAmazonAccessToken(function(err, accessToken){
-      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-      var opts = {
-        hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/sellers/v1/marketplaceParticipations',
-        method: 'GET',
-        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
-      };
-      var req2 = https.request(opts, function(res2){
-        var data = ''; res2.on('data',function(c){data+=c;}); res2.on('end',function(){
-          console.log('Seller info:', res2.statusCode, data.substring(0,500));
-          res.writeHead(200); res.end(data);
-        });
-      });
-      req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
-      req2.end();
-    });
-    return;
-  }
-
-  // ── Debug: Check Amazon listing restrictions for an ASIN ──
-  if (pathname === '/warehouse/check-amazon-restrictions' && req.method === 'GET') {
-    var asin = parsed.query.asin || '0525559477';
-    getAmazonAccessToken(function(err, accessToken){
-      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-      console.log('Using AMAZON_SELLER_ID:', AMAZON_SELLER_ID);
-      var restrictionsPath = '/listings/2021-08-01/restrictions?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&sellerId=' + AMAZON_SELLER_ID + '&asin=' + asin + '&conditionType=used_good';
-      console.log('Restrictions path:', restrictionsPath);
-      var opts = {
-        hostname: 'sellingpartnerapi-na.amazon.com',
-        path: restrictionsPath,
-        method: 'GET',
-        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
-      };
-      var req2 = https.request(opts, function(res2){
-        var data = ''; res2.on('data',function(c){data+=c;}); res2.on('end',function(){
-          console.log('Amazon restrictions:', res2.statusCode, data);
-          res.writeHead(200); res.end(data);
-        });
-      });
-      req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
-      req2.end();
-    });
-    return;
-  }
-
-  // ── Debug: Get Amazon product type requirements ──
-  if (pathname === '/warehouse/amazon-requirements' && req.method === 'GET') {
-    getAmazonAccessToken(function(err, accessToken){
-      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-      var opts = {
-        hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/definitions/2020-09-01/productTypes/PRODUCT?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&requirements=LISTING_OFFER_ONLY',
-        method: 'GET',
-        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
-      };
-      var req2 = https.request(opts, function(res2){
-        var data = ''; res2.on('data',function(c){data+=c;}); res2.on('end',function(){
-          console.log('Amazon requirements:', res2.statusCode, data.substring(0,1000));
-          res.writeHead(200); res.end(data);
-        });
-      });
-      req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
-      req2.end();
-    });
-    return;
-  }
-
-  // ── Debug: Test Amazon listing in VALIDATION_PREVIEW mode ──
-  if (pathname === '/warehouse/test-amazon-validate' && req.method === 'GET') {
-    var testAsin = parsed.query.asin || '0525559477';
-    var testSku = 'test-validate-' + Date.now();
-    getAmazonAccessToken(function(err, accessToken){
-      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-      var body = JSON.stringify({
-        productType: 'PRODUCT',
-        requirement: 'LISTING_OFFER_ONLY',
-        attributes: {
-          merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
-          condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
-          merchant_shipping_group: [{ value: 'Base shipping - standard', marketplace_id: AMAZON_MARKETPLACE_ID }],
-          fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
-          purchasable_offer: [{
-            marketplace_id: AMAZON_MARKETPLACE_ID,
-            currency: 'USD',
-            our_price: [{ schedule: [{ value_with_tax: 8.99 }] }]
-          }]
-        }
-      });
-      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID;
-      console.log('Validation path:', path);
-      console.log('Validation body:', body);
-      var opts = {
-        hostname: 'sellingpartnerapi-na.amazon.com',
-        path: path,
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-amz-access-token': accessToken,
-          'Content-Length': Buffer.byteLength(body)
-        }
-      };
-      var amzReq = https.request(opts, function(amzRes){
-        var amzData = '';
-        amzRes.on('data', function(c){ amzData += c; });
-        amzRes.on('end', function(){
-          console.log('Validation response:', amzRes.statusCode, amzData);
-          res.writeHead(200); res.end(JSON.stringify({ status: amzRes.statusCode, response: JSON.parse(amzData || '{}') }));
-        });
-      });
-      amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-      amzReq.setTimeout(15000, function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
-      amzReq.write(body); amzReq.end();
-    });
-    return;
-  }
-
-  // ── Debug: Test Amazon listing directly ──
-  if (pathname === '/warehouse/test-amazon-list' && req.method === 'GET') {
-    var testAsin = parsed.query.asin || '0525559477';
-    var testSku = 'test-sku-' + Date.now();
-    getAmazonAccessToken(function(err, accessToken){
-      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-      var body = JSON.stringify({
-        productType: 'PRODUCT',
-        requirement: 'LISTING_OFFER_ONLY',
-        attributes: {
-          merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
-          condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
-          purchasable_offer: [{
-            marketplace_id: AMAZON_MARKETPLACE_ID,
-            currency: 'USD',
-            our_price: [{ schedule: [{ value_with_tax: 8.99 }] }]
-          }],
-          fulfillment_availability: [{
-            fulfillment_channel_code: 'DEFAULT',
-            quantity: 1,
-            marketplace_id: AMAZON_MARKETPLACE_ID
-          }]
-        }
-      });
-      var opts = {
-        hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID,
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-amz-access-token': accessToken,
-          'x-amzn-api-version': '2021-08-01',
-          'Content-Length': Buffer.byteLength(body)
-        }
-      };
-      console.log('TEST Amazon body:', body);
-      console.log('TEST Amazon path:', opts.path);
-      var amzReq = https.request(opts, function(amzRes){
-        var amzData = '';
-        amzRes.on('data', function(c){ amzData += c; });
-        amzRes.on('end', function(){
-          console.log('TEST Amazon response:', amzRes.statusCode, amzData);
-          res.writeHead(200); res.end(JSON.stringify({ status: amzRes.statusCode, body: JSON.parse(amzData || '{}') }));
-        });
-      });
-      amzReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-      amzReq.write(body); amzReq.end();
-    });
-    return;
-  }
-
-  // ── Warehouse: Delete Amazon listing (rollback) ──
-  if (pathname === '/warehouse/delete-amazon' && req.method === 'POST') {
-    parseBody(req, function(err, data) {
-      var code = (data.code || '').toUpperCase();
-      getSubscriber(code, function(err, sub){
-        if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-        getAmazonAccessToken(function(err, accessToken){
-          if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
-          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
-          var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
-          var opts = {
-            hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(data.sku) + '?marketplaceIds=' + marketplaceId,
-            method: 'DELETE',
-            headers: { 'x-amz-access-token': accessToken }
-          };
-          var amzReq = https.request(opts, function(amzRes){
-            var d=''; amzRes.on('data',function(c){d+=c;}); amzRes.on('end',function(){
-              console.log('Amazon rollback response:', amzRes.statusCode, d.substring(0,200));
-              res.writeHead(200); res.end(JSON.stringify({ success: true }));
-            });
-          });
-          amzReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-          amzReq.end();
-        });
-      });
-    });
-    return;
-  }
-
   // ── Warehouse: List item on Amazon ──
   if (pathname === '/warehouse/list-amazon' && req.method === 'POST') {
     parseBody(req, function(err, data) {
       var code = (data.code || '').toUpperCase();
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-        var clientId = sub.amazonClientId || AMAZON_CLIENT_ID;
-        var clientSecret = sub.amazonClientSecret || AMAZON_CLIENT_SECRET;
-        var refreshToken = sub.amazonRefreshToken || AMAZON_REFRESH_TOKEN;
         var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
-        // Get Amazon access token
+        var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+
         getAmazonAccessToken(function(err, accessToken){
           if(err){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed: ' + err })); return; }
-          var sku = data.sku || '';
-          var price = parseFloat(data.price || 9.99).toFixed(2);
-          var conditionMap = {'New':'New','Like New':'UsedLikeNew','Very Good':'UsedVeryGood','Good':'UsedGood','Acceptable':'UsedAcceptable'};
-          var condition = conditionMap[data.conditionLabel] || 'UsedGood';
-          var asin = data.asin || '';
-          var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
-          var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
 
-          if(!asin){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ASIN available' })); return; }
+          var sku = (data.sku || '').toString();
+          var asin = (data.asin || '').toString();
+          var price = parseFloat(data.price);
+          if(!isFinite(price) || price <= 0) price = 9.99;
 
-          var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
-          var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
+          // Amazon SP-API offer-only listings require ASIN, not ISBN.
+          // The frontend should already have ASIN from the catalog lookup step.
+          if(!asin){
+            res.writeHead(200);
+            res.end(JSON.stringify({ error: 'ASIN required to list on Amazon (run catalog lookup first).' }));
+            return;
+          }
+          if(!sku){
+            res.writeHead(200);
+            res.end(JSON.stringify({ error: 'SKU required.' }));
+            return;
+          }
+
+          // Map frontend condition label -> Amazon SP-API condition value (lowercase_underscore format)
+          var conditionMap = {
+            'New':        'new_new',
+            'Like New':   'used_like_new',
+            'Very Good':  'used_very_good',
+            'Good':       'used_good',
+            'Acceptable': 'used_acceptable'
+          };
+          var conditionValue = conditionMap[data.conditionLabel] || 'used_good';
+
+          // Minimal offer-only listing payload. Keep attributes lean — fewer fields = fewer InvalidInput risks.
+          var attributes = {
+            merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
+            condition_type:          [{ value: conditionValue, marketplace_id: marketplaceId }],
+            fulfillment_availability:[{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
+            purchasable_offer: [{
+              marketplace_id: marketplaceId,
+              currency: 'USD',
+              our_price: [{ schedule: [{ value_with_tax: price }] }]
+            }]
+          };
+
+          // Only send merchant_shipping_group if the subscriber has configured a real template name.
+          // The value must match an existing shipping template in their Seller Central exactly.
+          if(sub.amazonShippingGroup){
+            attributes.merchant_shipping_group = [{ value: sub.amazonShippingGroup, marketplace_id: marketplaceId }];
+          }
+
           var body = JSON.stringify({
-            productType: 'PRODUCT',
-            requirement: 'LISTING_OFFER_ONLY',
-            attributes: {
-              merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
-              condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
-              merchant_shipping_group: [{ value: 'Base shipping - standard', marketplace_id: marketplaceId }],
-              fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
-              purchasable_offer: [{
-                marketplace_id: marketplaceId,
-                currency: 'USD',
-                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
-              }]
-            }
+            productType:  'PRODUCT',
+            requirements: 'LISTING_OFFER_ONLY',
+            attributes:   attributes
           });
+
           console.log('Amazon PUT body:', body);
+
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
             method: 'PUT',
             headers: {
-              'Content-Type': 'application/json',
+              'Content-Type':      'application/json',
               'x-amz-access-token': accessToken,
-              'x-amzn-api-version': '2021-08-01',
-              'Content-Length': Buffer.byteLength(body)
+              'Content-Length':     Buffer.byteLength(body)
             }
           };
+
           var amzReq = https.request(opts, function(amzRes){
-            var amzData = ''; amzRes.on('data',function(c){amzData+=c;}); amzRes.on('end',function(){
-              console.log('Amazon PUT response:', amzRes.statusCode, amzData);
-              try{
-                var json = JSON.parse(amzData);
-                if(json.status === 'ACCEPTED'){
-                  res.writeHead(200); res.end(JSON.stringify({ success: true, asin: asin, submissionId: json.submissionId }));
-                } else {
-                  var errMsg = (json.errors && json.errors[0] && json.errors[0].message) || (json.issues && json.issues[0] && json.issues[0].message) || amzData;
-                  res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
-                }
-              }catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: amzData })); }
+            var amzData = '';
+            amzRes.on('data', function(c){ amzData += c; });
+            amzRes.on('end', function(){
+              console.log('Amazon listing response:', amzRes.statusCode, amzData);
+              var json;
+              try { json = JSON.parse(amzData); }
+              catch(e){
+                res.writeHead(200);
+                res.end(JSON.stringify({ error: 'Amazon returned non-JSON: ' + amzData.substring(0,300) }));
+                return;
+              }
+
+              // Success paths: status ACCEPTED (async) or a 2xx HTTP
+              if(json.status === 'ACCEPTED' || amzRes.statusCode === 200 || amzRes.statusCode === 201){
+                res.writeHead(200);
+                res.end(JSON.stringify({
+                  success: true,
+                  asin: asin,
+                  sku: sku,
+                  submissionId: json.submissionId || null
+                }));
+                return;
+              }
+
+              // Error path: surface attribute-level issues[] first, then request-level errors[]
+              var issuesList = (json.issues || []).map(function(iss){
+                var names = iss.attributeNames ? iss.attributeNames.join(',') + ': '
+                          : (iss.attributeName ? iss.attributeName + ': ' : '');
+                return names + (iss.message || '') + ' [' + (iss.code || '') + ']';
+              }).join(' | ');
+              var topErr = (json.errors && json.errors[0])
+                ? (json.errors[0].message + (json.errors[0].details ? ': ' + json.errors[0].details : ''))
+                : '';
+              var errMsg = issuesList || topErr || ('Unknown Amazon error (HTTP ' + amzRes.statusCode + ')');
+              console.error('Amazon listing failed:', amzRes.statusCode, JSON.stringify(json));
+              res.writeHead(200);
+              res.end(JSON.stringify({ error: errMsg, status: amzRes.statusCode }));
             });
           });
-          amzReq.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-          amzReq.setTimeout(30000,function(){ amzReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+
+          amzReq.on('error', function(e){
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Network error: ' + e.message }));
+          });
+          amzReq.setTimeout(30000, function(){
+            amzReq.destroy();
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon request timeout' }));
+          });
           amzReq.write(body); amzReq.end();
         });
       });
@@ -1865,8 +1722,10 @@ var server = http.createServer(function(req, res) {
         var desc = cleanDescription(data.description || '');
 
         // Build picture URL from cover image
-        // Use eBay's own stock photo via ISBN - more reliable than external URLs
         var pictureXml = '';
+        if(data.coverUrl){
+          pictureXml = '<PictureDetails><PictureURL>' + data.coverUrl + '</PictureURL></PictureDetails>';
+        }
 
         var xml = '<?xml version="1.0" encoding="utf-8"?>'
           + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
@@ -1883,7 +1742,6 @@ var server = http.createServer(function(req, res) {
           + '<DispatchTimeMax>2</DispatchTimeMax>'
           + '<ListingDuration>GTC</ListingDuration>'
           + '<ListingType>FixedPriceItem</ListingType>'
-          + '<PictureDetails><GalleryType>Gallery</GalleryType></PictureDetails>'
           + '<SKU>' + esc(data.sku || '') + '</SKU>'
           + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
           + pictureXml
@@ -1894,19 +1752,18 @@ var server = http.createServer(function(req, res) {
           + '</SellerProfiles>'
           + '<ItemSpecifics>'
           + '<NameValueList><n>Book Title</n><Value>' + esc((data.bookTitle || data.title || '').replace(/^—+$/, '').substring(0,65) || 'See description') + '</Value></NameValueList>'
-          + '<NameValueList><n>Author</n><Value>' + esc((data.author && data.author.replace(/^—+$/, '')) || 'Unknown').substring(0,65) + '</Value></NameValueList>'
-          + '<NameValueList><n>Language</n><Value>' + esc(data.language && data.language.length > 1 ? data.language.charAt(0).toUpperCase() + data.language.slice(1).toLowerCase() : 'English') + '</Value></NameValueList>'
+          + '<NameValueList><n>Author</n><Value>' + esc((data.author || 'Unknown').replace(/^—+$/, '') || 'Unknown').substring(0,65) + '</Value></NameValueList>'
           + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
           + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
           + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
+          + '<NameValueList><n>Language</n><Value>' + esc(data.language || 'English') + '</Value></NameValueList>'
           + (data.edition ? '<NameValueList><n>Edition</n><Value>' + esc(data.edition) + '</Value></NameValueList>' : '')
           + (data.pages ? '<NameValueList><n>Number of Pages</n><Value>' + esc(String(data.pages)) + '</Value></NameValueList>' : '')
           + (data.series ? '<NameValueList><n>Series</n><Value>' + esc(data.series).substring(0,65) + '</Value></NameValueList>' : '')
+          + (data.asin ? '<NameValueList><n>ASIN</n><Value>' + esc(data.asin) + '</Value></NameValueList>' : '')
           + '</ItemSpecifics>'
-          + (data.isbn ? '<ProductListingDetails><ISBN>' + esc(data.isbn) + '</ISBN><IncludeStockPhotoURL>true</IncludeStockPhotoURL><UseStockPhotoURLAsGallery>true</UseStockPhotoURLAsGallery></ProductListingDetails>' : '')
           + '</Item>'
           + '</AddItemRequest>';
-        console.log('Warehouse eBay XML ItemSpecifics:', xml.substring(xml.indexOf('<ItemSpecifics>'), xml.indexOf('</ItemSpecifics>') + 16));
         var ebayOpts = {
           hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
           headers: {
