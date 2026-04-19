@@ -1653,23 +1653,20 @@ var server = http.createServer(function(req, res) {
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
       var body = JSON.stringify({
         productType: 'PRODUCT',
-        requirements: 'LISTING_OFFER_ONLY',
+        requirement: 'LISTING_OFFER_ONLY',
         attributes: {
           merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
           condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
+          merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: AMAZON_MARKETPLACE_ID }],
+          fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
           purchasable_offer: [{
             marketplace_id: AMAZON_MARKETPLACE_ID,
             currency: 'USD',
             our_price: [{ schedule: [{ value_with_tax: 8.99 }] }]
-          }],
-          fulfillment_availability: [{
-            fulfillment_channel_code: 'DEFAULT',
-            quantity: 1,
-            marketplace_id: AMAZON_MARKETPLACE_ID
           }]
         }
       });
-      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&issueLocale=en_US&mode=VALIDATION_PREVIEW';
+      var path = '/listings/2021-08-01/items/' + AMAZON_SELLER_ID + '/' + encodeURIComponent(testSku) + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&mode=VALIDATION_PREVIEW';
       console.log('Validation path:', path);
       console.log('Validation body:', body);
       var opts = {
@@ -1705,7 +1702,7 @@ var server = http.createServer(function(req, res) {
       if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
       var body = JSON.stringify({
         productType: 'PRODUCT',
-        requirements: 'LISTING_OFFER_ONLY',
+        requirement: 'LISTING_OFFER_ONLY',
         attributes: {
           merchant_suggested_asin: [{ value: testAsin, marketplace_id: AMAZON_MARKETPLACE_ID }],
           condition_type: [{ value: 'used_good', marketplace_id: AMAZON_MARKETPLACE_ID }],
@@ -1800,32 +1797,39 @@ var server = http.createServer(function(req, res) {
 
           if(!asin){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ASIN available' })); return; }
 
-          // Use PATCH to create offer on existing ASIN
           var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
           var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
+
+          // Exact format from Amazon SP-API documentation
           var body = JSON.stringify({
             productType: 'PRODUCT',
-            patches: [
-              { op: 'replace', path: '/attributes/merchant_suggested_asin', value: [{ value: asin, marketplace_id: marketplaceId }] },
-              { op: 'replace', path: '/attributes/condition_type', value: [{ value: condition2, marketplace_id: marketplaceId }] },
-              { op: 'replace', path: '/attributes/purchasable_offer', value: [{ marketplace_id: marketplaceId, currency: 'USD', our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }] }] },
-              { op: 'replace', path: '/attributes/fulfillment_availability', value: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1, marketplace_id: marketplaceId }] }
-            ]
+            requirement: 'LISTING_OFFER_ONLY',
+            attributes: {
+              merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
+              condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
+              merchant_shipping_group: [{ value: 'legacy-template-id', marketplace_id: marketplaceId }],
+              fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
+              purchasable_offer: [{
+                marketplace_id: marketplaceId,
+                currency: 'USD',
+                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
+              }]
+            }
           });
-          console.log('Amazon PATCH body:', body);
+          console.log('Amazon PUT body:', body);
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
-            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId + '&issueLocale=en_US',
-            method: 'PATCH',
+            path: '/listings/2021-08-01/items/' + sellerId + '/' + encodeURIComponent(sku) + '?marketplaceIds=' + marketplaceId,
+            method: 'PUT',
             headers: { 'Content-Type': 'application/json', 'x-amz-access-token': accessToken, 'Content-Length': Buffer.byteLength(body) }
           };
           var amzReq = https.request(opts, function(amzRes){
             var amzData = ''; amzRes.on('data',function(c){amzData+=c;}); amzRes.on('end',function(){
-              console.log('Amazon PATCH response:', amzRes.statusCode, amzData);
+              console.log('Amazon PUT response:', amzRes.statusCode, amzData);
               try{
                 var json = JSON.parse(amzData);
-                if(amzRes.statusCode === 200 || amzRes.statusCode === 201 || (json.status && json.status !== 'INVALID')){
-                  res.writeHead(200); res.end(JSON.stringify({ success: true, asin: asin }));
+                if(json.status === 'ACCEPTED'){
+                  res.writeHead(200); res.end(JSON.stringify({ success: true, asin: asin, submissionId: json.submissionId }));
                 } else {
                   var errMsg = (json.errors && json.errors[0] && json.errors[0].message) || (json.issues && json.issues[0] && json.issues[0].message) || amzData;
                   res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
