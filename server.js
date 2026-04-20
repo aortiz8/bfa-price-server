@@ -387,8 +387,19 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
       if(/<Ack>Success<\/Ack>/.test(data) || /<Timestamp>/.test(data)){
         cb({ ok: true });
       } else {
-        var errMatch = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
-        cb({ ok: false, error: 'Trading API: ' + (errMatch ? errMatch[1] : 'unknown error').substring(0, 160) });
+        // Try multiple error patterns eBay uses
+        var longMsg = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
+        var shortMsg = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+        var errCode = data.match(/<ErrorCode>([^<]+)<\/ErrorCode>/);
+        var ack = data.match(/<Ack>([^<]+)<\/Ack>/);
+        var errMsg = '';
+        if(longMsg) errMsg = longMsg[1];
+        else if(shortMsg) errMsg = shortMsg[1];
+        else if(errCode) errMsg = 'Error code ' + errCode[1];
+        else if(ack) errMsg = 'Ack=' + ack[1];
+        else if(r.statusCode !== 200) errMsg = 'HTTP ' + r.statusCode;
+        else errMsg = 'unrecognized response: ' + data.substring(0, 150).replace(/\s+/g, ' ');
+        cb({ ok: false, error: 'Trading API: ' + errMsg.substring(0, 200) });
       }
     });
   });
@@ -1844,6 +1855,55 @@ var server = http.createServer(function(req, res) {
       });
       req2.on('error',function(e){ res.writeHead(200); res.end(JSON.stringify({error:e.message})); });
       req2.end();
+    });
+    return;
+  }
+
+  // ── Debug: raw eBay Trading API test (shows full response) ──
+  // Hit: /debug-ebay-trading?code=BOOKSFORAGES1!
+  if (pathname === '/debug-ebay-trading' && req.method === 'GET') {
+    var dCode = (parsed.query.code || '').toUpperCase();
+    getSubscriber(dCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var clientId = sub.ebayClientId || CLIENT_ID;
+      var clientSecret = sub.ebayClientSecret || CLIENT_SECRET;
+      var userToken = sub.ebayUserToken || USER_TOKEN;
+      var devId = sub.ebayDevId || DEV_ID;
+      var info = {
+        hasClientId: !!clientId,  clientIdFirst: clientId ? clientId.substring(0,12) + '...' : null,
+        hasClientSecret: !!clientSecret, clientSecretFirst: clientSecret ? clientSecret.substring(0,10) + '...' : null,
+        hasUserToken: !!userToken, userTokenLen: userToken ? userToken.length : 0, userTokenFirst: userToken ? userToken.substring(0,20) + '...' : null,
+        hasDevId: !!devId, devIdFirst: devId ? devId.substring(0,12) + '...' : null
+      };
+      var xml = '<?xml version="1.0" encoding="utf-8"?>'
+        + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+        + '<RequesterCredentials><eBayAuthToken>' + (userToken || '') + '</eBayAuthToken></RequesterCredentials>'
+        + '</GeteBayOfficialTimeRequest>';
+      var opts = {
+        hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+        headers: {
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+          'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+          'X-EBAY-API-DEV-NAME': devId || '',
+          'X-EBAY-API-APP-NAME': clientId || '',
+          'X-EBAY-API-CERT-NAME': clientSecret || '',
+          'Content-Type': 'text/xml',
+          'Content-Length': Buffer.byteLength(xml)
+        }
+      };
+      var tReq = https.request(opts, function(r){
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          info.httpStatus = r.statusCode;
+          info.rawResponse = data.substring(0, 2000);
+          res.writeHead(200); res.end(JSON.stringify(info, null, 2));
+        });
+      });
+      tReq.on('error', function(e){ info.networkError = e.message; res.writeHead(200); res.end(JSON.stringify(info, null, 2)); });
+      tReq.setTimeout(15000, function(){ tReq.destroy(); info.timeout = true; res.writeHead(200); res.end(JSON.stringify(info, null, 2)); });
+      tReq.write(xml); tReq.end();
     });
     return;
   }
