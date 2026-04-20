@@ -131,7 +131,7 @@ function addSecurityHeaders(res) {
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-admin-key, x-access-code');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-admin-key, x-access-code, x-session-token');
 }
 
 function parseBody(req, cb) {
