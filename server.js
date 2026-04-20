@@ -1061,15 +1061,13 @@ var server = http.createServer(function(req, res) {
       var offsetMinutes = parseInt(data.offset || '0');
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(200); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-        // Validate token - check current and previous window (allow 60s grace)
+        // Validate token - check current and previous window (allow ~1min grace)
         var now = Date.now();
         var window1 = Math.floor(now / 60000);
         var window2 = window1 - 1;
-        var window3 = window1 - 2;
         var validToken1 = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window1).digest('hex').substring(0, 12);
         var validToken2 = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window2).digest('hex').substring(0, 12);
-        var validToken3 = crypto.createHmac('sha256', ADMIN_KEY).update(code + ':' + window3).digest('hex').substring(0, 12);
-        if (token !== validToken1 && token !== validToken2 && token !== validToken3) {
+        if (token !== validToken1 && token !== validToken2) {
           res.writeHead(200); res.end(JSON.stringify({ error: 'QR code expired. Please scan the latest QR code.' })); return;
         }
         // Find employee by PIN
