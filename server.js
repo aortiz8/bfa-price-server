@@ -1151,6 +1151,8 @@ var server = http.createServer(function(req, res) {
                     var ageHours = Math.round((now - created) / 3600000 * 10) / 10;
                     var skuRaw = cached.sku || '';
                     var skuPrefix = skuRaw.split(/[-\.]/)[0] || skuRaw;
+                    var itemCount = parseInt(o.NumberOfItemsUnshipped || 0) + parseInt(o.NumberOfItemsShipped || 0);
+                    if(!itemCount) itemCount = 1;
                     return {
                       orderId: o.AmazonOrderId,
                       orderDate: o.PurchaseDate,
@@ -1161,14 +1163,31 @@ var server = http.createServer(function(req, res) {
                       skuPrefix: skuPrefix,
                       price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
                       condition: cached.condition || '',
-                      cancelState: 'NONE_REQUESTED'
+                      cancelState: 'NONE_REQUESTED',
+                      itemCount: itemCount,
+                      shippingCategory: o.ShipmentServiceLevelCategory || '',  // 'Expedited', 'Standard', 'NextDay', etc.
+                      location: null
                     };
                   });
-                  res.writeHead(200); res.end(JSON.stringify({
-                    pending: pending,
-                    canceled: [],
-                    actionNeeded: []
-                  }));
+                  // Enrich with warehouse location from warehouse_inventory
+                  var skusForLookup = pending.map(function(o){ return o.sku; }).filter(Boolean);
+                  if(skusForLookup.length && database){
+                    database.collection('warehouse_inventory')
+                      .find({ code: aCode, sku: { $in: skusForLookup } })
+                      .project({ sku: 1, location: 1 })
+                      .toArray()
+                      .then(function(rows){
+                        var locMap = {};
+                        (rows || []).forEach(function(r){ if(r.sku) locMap[r.sku] = r.location || null; });
+                        pending.forEach(function(o){ o.location = locMap[o.sku] || null; });
+                        res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                      })
+                      .catch(function(){
+                        res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                      });
+                  } else {
+                    res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                  }
                 }
                 startNext();
               }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ error: 'Cache read error', pending: [] })); });
@@ -1290,21 +1309,50 @@ var server = http.createServer(function(req, res) {
                         skuPrefix: skuPrefix,
                         price: parseFloat(o.pricingSummary.priceSubtotal.value),
                         condition: item.condition || '',
-                        cancelState: o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED'
+                        cancelState: o.cancelStatus ? o.cancelStatus.cancelState : 'NONE_REQUESTED',
+                        itemCount: (o.lineItems || []).length || 1,
+                        shippingCategory: '' // eBay orders don't have expedited flag in this context
                       };
                     }
-                    pending = pending.map(simplify).sort(function(a, b) {
-                      var aIsAlpha = /^[A-Za-z]/.test(a.skuPrefix);
-                      var bIsAlpha = /^[A-Za-z]/.test(b.skuPrefix);
-                      if (aIsAlpha && !bIsAlpha) return -1;
-                      if (!aIsAlpha && bIsAlpha) return 1;
-                      return a.sku.localeCompare(b.sku);
-                    });
-                    res.writeHead(200); res.end(JSON.stringify({
-                      pending: pending,
-                      canceled: canceled.map(simplify),
-                      actionNeeded: actionNeeded.map(simplify)
-                    }));
+                    var simplePending = pending.map(simplify);
+                    var simpleCanceled = canceled.map(simplify);
+                    var simpleActionNeeded = actionNeeded.map(simplify);
+
+                    // Enrich each order with its warehouse location (row/section/sequence)
+                    // from warehouse_inventory, keyed by SKU. Mexico SKUs (MX/UP prefix) won't match;
+                    // frontend handles those with SKU-based sorting.
+                    var allOrdersForLookup = simplePending.concat(simpleCanceled).concat(simpleActionNeeded);
+                    var skusToLookup = allOrdersForLookup.map(function(o){ return o.sku; }).filter(Boolean);
+                    if(skusToLookup.length && database){
+                      database.collection('warehouse_inventory')
+                        .find({ code: code, sku: { $in: skusToLookup } })
+                        .project({ sku: 1, location: 1 })
+                        .toArray()
+                        .then(function(rows){
+                          var locMap = {};
+                          (rows || []).forEach(function(r){ if(r.sku) locMap[r.sku] = r.location || null; });
+                          allOrdersForLookup.forEach(function(o){ o.location = locMap[o.sku] || null; });
+                          res.writeHead(200); res.end(JSON.stringify({
+                            pending: simplePending,
+                            canceled: simpleCanceled,
+                            actionNeeded: simpleActionNeeded
+                          }));
+                        })
+                        .catch(function(){
+                          // If lookup fails, return orders without location
+                          res.writeHead(200); res.end(JSON.stringify({
+                            pending: simplePending,
+                            canceled: simpleCanceled,
+                            actionNeeded: simpleActionNeeded
+                          }));
+                        });
+                    } else {
+                      res.writeHead(200); res.end(JSON.stringify({
+                        pending: simplePending,
+                        canceled: simpleCanceled,
+                        actionNeeded: simpleActionNeeded
+                      }));
+                    }
                   }
                 } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
               });
