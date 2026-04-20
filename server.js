@@ -322,6 +322,174 @@ function refreshAllEbayTokens() {
 setTimeout(refreshAllEbayTokens, 30 * 1000);
 setInterval(refreshAllEbayTokens, 90 * 60 * 1000);
 
+// ─────────────────────────────────────────────────────────────
+// TOOL HEALTH CHECK SYSTEM
+// Runs every 5 minutes. Caches latest result per subscriber.
+// Used by portal to show green/red status indicators.
+// ─────────────────────────────────────────────────────────────
+var toolHealthCache = {}; // { 'SUBSCRIBERCODE': { ebayListingTool: {...}, warehouseTool: {...}, checkedAt: ISO } }
+
+// Test #1: eBay Browse API (price suggestions)
+// Obtains app token via client_credentials grant. If it succeeds, price suggestions can work.
+function testEbayBrowseApi(clientId, clientSecret, cb){
+  if(!clientId || !clientSecret){ cb({ ok: false, error: 'Missing eBay Client ID or Client Secret' }); return; }
+  var credentials = Buffer.from(clientId + ':' + clientSecret).toString('base64');
+  var body = 'grant_type=client_credentials&scope=' + encodeURIComponent('https://api.ebay.com/oauth/api_scope');
+  var opts = {
+    hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Authorization': 'Basic ' + credentials, 'Content-Length': Buffer.byteLength(body) }
+  };
+  var tReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.access_token) cb({ ok: true });
+        else cb({ ok: false, error: 'Browse API token denied: ' + (json.error_description || json.error || 'unknown') });
+      } catch(e){ cb({ ok: false, error: 'Browse API parse error' }); }
+    });
+  });
+  tReq.on('error', function(e){ cb({ ok: false, error: 'Browse API network: ' + e.message }); });
+  tReq.setTimeout(10000, function(){ tReq.destroy(); cb({ ok: false, error: 'Browse API timeout' }); });
+  tReq.write(body); tReq.end();
+}
+
+// Test #2: eBay Trading API (AddItem / UploadSiteHostedPictures use this auth)
+// Uses GeteBayOfficialTime — a zero-cost verb that validates all 4 credentials at once
+// (eBayAuthToken + DevID + AppID + CertID). If it returns an ItemID-less success, creds work.
+function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
+  if(!userToken){ cb({ ok: false, error: 'Missing eBay User Token' }); return; }
+  if(!devId){ cb({ ok: false, error: 'Missing eBay Dev ID' }); return; }
+  if(!clientId || !clientSecret){ cb({ ok: false, error: 'Missing eBay App ID or Cert ID' }); return; }
+  var xml = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
+    + '</GeteBayOfficialTimeRequest>';
+  var opts = {
+    hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+    headers: {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+      'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+      'X-EBAY-API-DEV-NAME': devId,
+      'X-EBAY-API-APP-NAME': clientId,
+      'X-EBAY-API-CERT-NAME': clientSecret,
+      'Content-Type': 'text/xml',
+      'Content-Length': Buffer.byteLength(xml)
+    }
+  };
+  var tReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      // Look for Ack=Success or Timestamp in response; error comes back as <LongMessage>
+      if(/<Ack>Success<\/Ack>/.test(data) || /<Timestamp>/.test(data)){
+        cb({ ok: true });
+      } else {
+        var errMatch = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
+        cb({ ok: false, error: 'Trading API: ' + (errMatch ? errMatch[1] : 'unknown error').substring(0, 160) });
+      }
+    });
+  });
+  tReq.on('error', function(e){ cb({ ok: false, error: 'Trading API network: ' + e.message }); });
+  tReq.setTimeout(10000, function(){ tReq.destroy(); cb({ ok: false, error: 'Trading API timeout' }); });
+  tReq.write(xml); tReq.end();
+}
+
+// Test #3: eBay Business Policies are saved
+function testEbayPolicies(sub){
+  if(!sub.ebayShippingPolicyId) return { ok: false, error: 'Missing Shipping Policy ID' };
+  if(!sub.ebayPaymentPolicyId)  return { ok: false, error: 'Missing Payment Policy ID' };
+  if(!sub.ebayReturnPolicyId)   return { ok: false, error: 'Missing Return Policy ID' };
+  return { ok: true };
+}
+
+// Test #4: Amazon SP-API — get access token + ping marketplaceParticipations
+function testAmazonSpApi(cb){
+  getAmazonAccessToken(function(err, accessToken){
+    if(err){ cb({ ok: false, error: 'Amazon token: ' + String(err).substring(0, 160) }); return; }
+    var opts = {
+      hostname: 'sellingpartnerapi-na.amazon.com',
+      path: '/sellers/v1/marketplaceParticipations',
+      method: 'GET',
+      headers: { 'x-amz-access-token': accessToken }
+    };
+    var tReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        if(r.statusCode === 200){ cb({ ok: true }); }
+        else {
+          var short = data.substring(0, 200).replace(/\s+/g, ' ');
+          cb({ ok: false, error: 'Amazon SP-API ' + r.statusCode + ': ' + short });
+        }
+      });
+    });
+    tReq.on('error', function(e){ cb({ ok: false, error: 'Amazon SP-API network: ' + e.message }); });
+    tReq.setTimeout(12000, function(){ tReq.destroy(); cb({ ok: false, error: 'Amazon SP-API timeout' }); });
+    tReq.end();
+  });
+}
+
+// Run all tests for one subscriber, cache results
+function runHealthCheckForSubscriber(sub){
+  if(!sub || !sub.code) return;
+  var code = sub.code.toUpperCase();
+  var clientId = sub.ebayClientId || CLIENT_ID;
+  var clientSecret = sub.ebayClientSecret || CLIENT_SECRET;
+  var userToken = sub.ebayUserToken || USER_TOKEN;
+  var devId = sub.ebayDevId || DEV_ID;
+
+  var results = { browseApi: null, tradingApi: null, policies: null, amazon: null };
+  var completed = 0;
+
+  function done(){
+    completed++;
+    if(completed < 3) return; // wait for browseApi, tradingApi, amazon (policies is sync)
+    results.policies = testEbayPolicies(sub);
+
+    // eBay Listing Tool = browseApi + tradingApi + policies all pass
+    var eBayOk = results.browseApi.ok && results.tradingApi.ok && results.policies.ok;
+    var eBayFails = [];
+    if(!results.browseApi.ok)  eBayFails.push('Price suggestions: ' + results.browseApi.error);
+    if(!results.tradingApi.ok) eBayFails.push('Listing auth: ' + results.tradingApi.error);
+    if(!results.policies.ok)   eBayFails.push('Business policies: ' + results.policies.error);
+
+    // Warehouse Tool = everything eBay Listing Tool needs + Amazon
+    var whOk = eBayOk && results.amazon.ok;
+    var whFails = eBayFails.slice();
+    if(!results.amazon.ok) whFails.push('Amazon: ' + results.amazon.error);
+
+    toolHealthCache[code] = {
+      ebayListingTool: { ok: eBayOk, errors: eBayFails, details: results },
+      warehouseTool:   { ok: whOk, errors: whFails, details: results },
+      checkedAt: new Date().toISOString()
+    };
+    console.log('Tool health for', code, '— eBay:', eBayOk ? 'OK' : 'FAIL', '| Warehouse:', whOk ? 'OK' : 'FAIL');
+  }
+
+  testEbayBrowseApi(clientId, clientSecret, function(res){ results.browseApi = res; done(); });
+  testEbayTradingApi(userToken, devId, clientId, clientSecret, function(res){ results.tradingApi = res; done(); });
+  testAmazonSpApi(function(res){ results.amazon = res; done(); });
+}
+
+// Run health checks for all subscribers
+function runAllHealthChecks(){
+  connectMongo(function(err, database){
+    if(err || !database) return;
+    database.collection('subscribers').find({}).toArray()
+    .then(function(subs){
+      (subs || []).forEach(function(sub){ runHealthCheckForSubscriber(sub); });
+    })
+    .catch(function(e){ console.log('Health check DB error:', e.message); });
+  });
+}
+
+// Run 45 seconds after startup, then every 5 minutes
+setTimeout(runAllHealthChecks, 45 * 1000);
+setInterval(runAllHealthChecks, 5 * 60 * 1000);
+
 // Schedule daily reports at 8pm
 function scheduleDailyReports() {
   setInterval(function() {
@@ -2488,6 +2656,31 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Subscriber self-service: get own listings ──
+  // ── Subscriber: tool health status (for portal status indicators) ──
+  if (pathname === '/my/tool-status' && req.method === 'GET') {
+    var tCode = (parsed.query.code || '').toUpperCase();
+    var forceRun = parsed.query.refresh === '1';
+    getSubscriber(tCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var cached = toolHealthCache[tCode];
+      // If no cached result yet or user forced refresh, kick off a check now and return whatever we have
+      if(!cached || forceRun){
+        runHealthCheckForSubscriber(sub);
+        // If nothing cached at all, return "checking" state
+        if(!cached){
+          res.writeHead(200); res.end(JSON.stringify({
+            ebayListingTool: { ok: null, errors: [], status: 'checking' },
+            warehouseTool:   { ok: null, errors: [], status: 'checking' },
+            checkedAt: null
+          }));
+          return;
+        }
+      }
+      res.writeHead(200); res.end(JSON.stringify(cached));
+    });
+    return;
+  }
+
   if (pathname === '/my/listings' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var dateFilter = parsed.query.date || new Date().toISOString().split('T')[0];
