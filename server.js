@@ -426,24 +426,36 @@ function testEbayTradingApi(sub, cb){
       var data = '';
       r.on('data', function(c){ data += c; });
       r.on('end', function(){
-        // VerifyAddItem success: Ack=Success OR Ack=Warning (warnings are OK, means item validates but has minor issues)
+        // VerifyAddItem success cases:
+        //   1) Ack=Success — item fully valid
+        //   2) Ack=Warning — item valid with minor warnings
+        //   3) Ack=Failure BUT only content errors (not auth) — means auth works, just our fake item data incomplete
+        // Auth failure cases: token-related error codes
         if(/<Ack>Success<\/Ack>/.test(data) || /<Ack>Warning<\/Ack>/.test(data)){
+          cb({ ok: true }); return;
+        }
+        // Look at error codes to distinguish auth vs content errors
+        var errorCodes = (data.match(/<ErrorCode>(\d+)<\/ErrorCode>/g) || [])
+          .map(function(m){ return m.replace(/<\/?ErrorCode>/g, ''); });
+        // eBay auth-related error codes (invalid token, app, permissions)
+        var authErrorCodes = ['931','932','16110','17470','17471','21916249','21919188','10001','2038'];
+        var hasAuthError = errorCodes.some(function(c){ return authErrorCodes.indexOf(c) !== -1; });
+        // Got an eBay XML response (HTTP 200, parseable) with no auth-specific errors = auth works
+        if(r.statusCode === 200 && errorCodes.length > 0 && !hasAuthError){
           cb({ ok: true }); return;
         }
         // Transient 503 — retry
         if(r.statusCode === 503 && attempt < maxAttempts){
           setTimeout(tryOnce, 1500 * attempt); return;
         }
-        // Parse errors
+        // Real failure — parse the main message
         var longMsg = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
         var shortMsg = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
-        var errCode = data.match(/<ErrorCode>([^<]+)<\/ErrorCode>/);
-        var ack = data.match(/<Ack>([^<]+)<\/Ack>/);
         var errMsg = '';
-        if(longMsg) errMsg = longMsg[1];
+        if(hasAuthError && longMsg) errMsg = longMsg[1];
+        else if(hasAuthError) errMsg = 'auth error code ' + errorCodes.filter(function(c){ return authErrorCodes.indexOf(c)!==-1; })[0];
+        else if(longMsg) errMsg = longMsg[1];
         else if(shortMsg) errMsg = shortMsg[1];
-        else if(errCode) errMsg = 'Error code ' + errCode[1];
-        else if(ack) errMsg = 'Ack=' + ack[1];
         else if(r.statusCode === 503) errMsg = 'eBay CDN 503 after ' + attempt + ' attempts';
         else if(r.statusCode !== 200) errMsg = 'HTTP ' + r.statusCode;
         else errMsg = 'unrecognized response';
