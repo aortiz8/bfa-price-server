@@ -853,36 +853,51 @@ var server = http.createServer(function(req, res) {
         if (err || !sub) { res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'Invalid access code' })); return; }
         if (!sub.active) { res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'Your subscription is inactive. Please contact Books for Ages.' })); return; }
 
-        // Role detection: PIN present → employee login, no PIN → owner login
-        var role = 'owner';
+        var employees = sub.employees || [];
+        var hasAdmin = employees.some(function(e){ return e.isAdmin === true; });
+
+        // Role resolution:
+        // - PIN provided: match against employees, use isAdmin flag
+        // - No PIN + no admin exists yet: bootstrap mode → grant admin (so user can set up their admin PIN)
+        // - No PIN + admin exists: reject
+        var role = null;
         var employeeName = null;
+
         if (pin) {
-          var emp = (sub.employees || []).find(function(e){ return e.pin === pin; });
+          var emp = employees.find(function(e){ return e.pin === pin; });
           if (!emp) {
             res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'Invalid PIN for this business.' }));
             return;
           }
-          role = 'employee';
+          role = emp.isAdmin ? 'admin' : 'employee';
           employeeName = emp.name;
+        } else {
+          if (!hasAdmin) {
+            // Bootstrap: no admin set up yet, allow code-only admin access for initial setup
+            role = 'admin';
+            employeeName = null;
+          } else {
+            res.writeHead(200); res.end(JSON.stringify({ valid: false, message: 'PIN required. Please enter your 4-digit PIN.' }));
+            return;
+          }
         }
 
         var sessionToken = createSession(sub.code.toUpperCase(), role, employeeName);
 
-        // Base response (always safe to return)
         var response = {
           valid: true,
           role: role,
           employeeName: employeeName,
           sessionToken: sessionToken,
           businessName: sub.businessName,
-          employees: (sub.employees || []).map(function(e){
-            // Employees see names only (not PINs/pay rates)
-            return role === 'owner' ? e : { name: e.name };
+          employees: employees.map(function(e){
+            // Admins see everything; employees see names only
+            return role === 'admin' ? e : { name: e.name };
           })
         };
 
-        // Owner-only fields (sensitive)
-        if (role === 'owner') {
+        // Admin-only sensitive fields
+        if (role === 'admin') {
           response.reportEmail = sub.email;
           response.ebayClientId = sub.ebayClientId || '';
           response.ebayClientSecret = sub.ebayClientSecret || '';
@@ -1636,8 +1651,8 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/tc/employees' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var sessTcEmp = getRequestSession(req, parsed);
-    if(!sessTcEmp || sessTcEmp.role !== 'owner' || sessTcEmp.subscriberCode !== code){
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Owner access required.' })); return;
+    if(!sessTcEmp || sessTcEmp.role !== 'admin' || sessTcEmp.subscriberCode !== code){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
     }
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
@@ -1653,8 +1668,8 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/tc/clear' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var sessTcClr = getRequestSession(req, parsed);
-    if(!sessTcClr || sessTcClr.role !== 'owner' || sessTcClr.subscriberCode !== code){
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Owner access required.' })); return;
+    if(!sessTcClr || sessTcClr.role !== 'admin' || sessTcClr.subscriberCode !== code){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
     }
     var name = parsed.query.name || '';
     var date = parsed.query.date || '';
@@ -1675,8 +1690,8 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/tc/debug' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var sessTcDbg = getRequestSession(req, parsed);
-    if(!sessTcDbg || sessTcDbg.role !== 'owner' || sessTcDbg.subscriberCode !== code){
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Owner access required.' })); return;
+    if(!sessTcDbg || sessTcDbg.role !== 'admin' || sessTcDbg.subscriberCode !== code){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
     }
     var name = parsed.query.name || '';
     connectMongo(function(err, database) {
@@ -2359,8 +2374,8 @@ var server = http.createServer(function(req, res) {
   if (pathname === '/admin/wipe-test-listings' && req.method === 'GET') {
     var wCode = (parsed.query.code || '').toUpperCase();
     var sessWipe = getRequestSession(req, parsed);
-    if(!sessWipe || sessWipe.role !== 'owner' || sessWipe.subscriberCode !== wCode){
-      res.writeHead(403); res.end(JSON.stringify({ error: 'Owner access required.' })); return;
+    if(!sessWipe || sessWipe.role !== 'admin' || sessWipe.subscriberCode !== wCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
     }
     var wConfirm = parsed.query.confirm || '';
     if (wConfirm !== 'YES') {
@@ -3399,8 +3414,8 @@ var server = http.createServer(function(req, res) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
       // Require valid owner session to modify settings
       var session = getRequestSession(req, parsed);
-      if(!session || session.role !== 'owner' || session.subscriberCode !== code.toUpperCase()){
-        res.writeHead(403); res.end(JSON.stringify({ error: 'Owner access required to modify settings.' })); return;
+      if(!session || session.role !== 'admin' || session.subscriberCode !== code.toUpperCase()){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required to modify settings.' })); return;
       }
       getSubscriber(code, function(err, sub) {
         if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
