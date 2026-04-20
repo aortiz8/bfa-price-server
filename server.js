@@ -1096,6 +1096,107 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Amazon Sales API ──
+  // Uses SP-API Orders endpoint. Mirrors /my/ebay/sales logic for consistency.
+  if (pathname === '/my/amazon/sales' && req.method === 'GET') {
+    var code = (parsed.query.code || '').toUpperCase();
+    var period = parsed.query.period || 'today';
+    var offsetMinutes = parseInt(parsed.query.offset || '0');
+    var specificDate = parsed.query.date || null;
+    getSubscriber(code, function(err, sub) {
+      if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+
+      // Calculate date range — identical logic to eBay
+      var now = new Date();
+      var localNow = new Date(now.getTime() - offsetMinutes * 60000);
+      var startDate, endDate;
+      if (specificDate) {
+        var d = new Date(specificDate + 'T00:00:00');
+        startDate = new Date(d.getTime() + offsetMinutes * 60000);
+        endDate = new Date(d.getTime() + offsetMinutes * 60000 + 86400000);
+      } else if (period === 'today') {
+        startDate = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate()));
+        startDate = new Date(startDate.getTime() + offsetMinutes * 60000);
+        endDate = null;
+      } else if (period === 'week') {
+        var dayOfWeek = localNow.getUTCDay();
+        var daysFromMonday = (dayOfWeek === 0) ? 6 : dayOfWeek - 1;
+        var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
+        startDate = new Date(monday.getTime() + offsetMinutes * 60000);
+        endDate = null;
+      } else {
+        var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
+        startDate = new Date(monthStart.getTime() + offsetMinutes * 60000);
+        endDate = null;
+      }
+
+      getAmazonAccessToken(function(tokenErr, accessToken){
+        if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, orders: [] })); return; }
+        // SP-API Orders: /orders/v0/orders
+        var allOrders = [];
+        function fetchOrders(nextToken){
+          var qp = 'MarketplaceIds=' + marketplaceId
+                 + '&CreatedAfter=' + encodeURIComponent(startDate.toISOString());
+          if(endDate) qp += '&CreatedBefore=' + encodeURIComponent(endDate.toISOString());
+          if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
+          var opts = {
+            hostname: 'sellingpartnerapi-na.amazon.com',
+            path: '/orders/v0/orders?' + qp,
+            method: 'GET',
+            headers: { 'x-amz-access-token': accessToken }
+          };
+          var aReq = https.request(opts, function(r){
+            var data = '';
+            r.on('data', function(c){ data += c; });
+            r.on('end', function(){
+              try {
+                var json = JSON.parse(data);
+                if(json.errors && json.errors[0]){
+                  res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].message || json.errors[0].code, orders: [] })); return;
+                }
+                var payload = json.payload || {};
+                var orders = (payload.Orders || []).filter(function(o){
+                  // Treat valid sales as: not Canceled, not Pending, has a total
+                  return o.OrderStatus !== 'Canceled' && o.OrderStatus !== 'Pending' && o.OrderTotal;
+                });
+                allOrders = allOrders.concat(orders);
+                if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
+                // Done — compute totals
+                var totalRevenue = allOrders.reduce(function(sum, o){
+                  var amt = o.OrderTotal && parseFloat(o.OrderTotal.Amount);
+                  return sum + (isNaN(amt) ? 0 : amt);
+                }, 0);
+                var simplified = allOrders.map(function(o){
+                  return {
+                    orderId: o.AmazonOrderId,
+                    date: o.PurchaseDate,
+                    title: '',  // SP-API Orders list doesn't include item titles — would need separate call per order
+                    price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
+                    paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0, // Amazon fees aren't in this response
+                    status: o.OrderStatus,
+                    buyer: ''
+                  };
+                });
+                res.writeHead(200); res.end(JSON.stringify({
+                  count: allOrders.length,
+                  totalRevenue: Math.round(totalRevenue * 100) / 100,
+                  orders: simplified
+                }));
+              } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
+            });
+          });
+          aReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
+          aReq.setTimeout(20000, function(){ aReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
+          aReq.end();
+        }
+        fetchOrders(null);
+      });
+    });
+    return;
+  }
+
   // ── eBay Sales API ──
   if (pathname === '/my/ebay/sales' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
