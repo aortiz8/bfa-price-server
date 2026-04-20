@@ -2337,6 +2337,37 @@ var server = http.createServer(function(req, res) {
 
   // ── Debug: raw eBay Trading API test (shows full response) ──
   // Hit: /debug-ebay-trading?code=BOOKSFORAGES1!
+  // Debug: look up a SKU in warehouse_inventory
+  // Hit: /debug-location?code=BOOKSFORAGES1!&sku=SHM.5STL
+  if (pathname === '/debug-location' && req.method === 'GET') {
+    var dlCode = (parsed.query.code || '').toUpperCase();
+    var dlSku = parsed.query.sku || '';
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+      // Try both code casings + any matching SKU
+      database.collection('warehouse_inventory').find({ sku: dlSku }).toArray()
+        .then(function(rows){
+          res.writeHead(200); res.end(JSON.stringify({
+            skuQueried: dlSku,
+            codeQueried: dlCode,
+            matchesFound: (rows || []).length,
+            results: (rows || []).map(function(r){
+              return {
+                sku: r.sku,
+                code: r.code,
+                location: r.location,
+                status: r.status,
+                title: r.title ? r.title.substring(0, 60) : '',
+                createdAt: r.createdAt
+              };
+            })
+          }, null, 2));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+    });
+    return;
+  }
+
   if (pathname === '/debug-ebay-trading' && req.method === 'GET') {
     var dCode = (parsed.query.code || '').toUpperCase();
     getSubscriber(dCode, function(err, sub){
