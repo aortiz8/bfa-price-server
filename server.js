@@ -3463,7 +3463,17 @@ var server = http.createServer(function(req, res) {
           database.collection('subscribers').updateOne(codeFilter, { $set: allowed })
             .then(function(result) {
               if (result.matchedCount === 0) {
-                res.writeHead(200); res.end(JSON.stringify({ error: 'Save failed: no subscriber matched access code (case-sensitive issue?). Please contact support.' }));
+                // Diagnostic: list all subscriber codes to help figure out the mismatch
+                database.collection('subscribers').find({}).project({ code: 1 }).toArray()
+                  .then(function(all){
+                    var codes = (all || []).map(function(s){ return s.code; });
+                    res.writeHead(200); res.end(JSON.stringify({
+                      error: 'Save failed: no subscriber matched "' + code + '". Codes in DB: ' + JSON.stringify(codes)
+                    }));
+                  })
+                  .catch(function(){
+                    res.writeHead(200); res.end(JSON.stringify({ error: 'Save failed: no match for "' + code + '"' }));
+                  });
                 return;
               }
               res.writeHead(200); res.end(JSON.stringify({ success: true, matched: result.matchedCount, modified: result.modifiedCount }));
