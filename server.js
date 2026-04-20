@@ -3544,6 +3544,66 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Subscriber self-service: update own settings ──
+  // Bulk-upsert SKU → location mappings into warehouse_inventory.
+  // Admin-only. Used to backfill locations for items listed before location tracking existed.
+  // POST /my/backfill-locations  body: { code, entries: [{sku, row, section, sequence}, ...] }
+  if (pathname === '/my/backfill-locations' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var bfCode = (data.code || '').toUpperCase();
+      var session = getRequestSession(req, parsed);
+      if(!session || session.role !== 'admin' || session.subscriberCode !== bfCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var entries = Array.isArray(data.entries) ? data.entries : [];
+      if(!entries.length){ res.writeHead(400); res.end(JSON.stringify({ error: 'No entries provided.' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var results = { ok: 0, updated: 0, inserted: 0, errors: [] };
+        var idx = 0;
+        function next(){
+          if(idx >= entries.length){
+            res.writeHead(200); res.end(JSON.stringify(results)); return;
+          }
+          var e = entries[idx++];
+          var sku = (e.sku || '').trim();
+          var row = parseInt(e.row);
+          var section = (e.section || '').toString().trim().toUpperCase();
+          var sequence = parseInt(e.sequence);
+          if(!sku || isNaN(row) || !section || isNaN(sequence)){
+            results.errors.push({ entry: e, error: 'Missing or invalid field(s)' });
+            return next();
+          }
+          var location = { row: row, section: section, sequence: sequence };
+          // Upsert: if SKU exists, update location; otherwise insert minimal record
+          database.collection('warehouse_inventory').updateOne(
+            { sku: sku },
+            {
+              $set: { location: location, code: bfCode },
+              $setOnInsert: {
+                sku: sku, status: 'active', createdAt: new Date(),
+                title: '', isbn: '', author: '', price: 0, listedOn: [],
+                backfilled: true
+              }
+            },
+            { upsert: true }
+          )
+          .then(function(r){
+            results.ok++;
+            if(r.upsertedCount) results.inserted++;
+            else if(r.modifiedCount) results.updated++;
+            next();
+          })
+          .catch(function(err){
+            results.errors.push({ sku: sku, error: err.message });
+            next();
+          });
+        }
+        next();
+      });
+    });
+    return;
+  }
+
   if (pathname === '/my/settings' && req.method === 'PUT') {
     parseBody(req, function(err, data) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
