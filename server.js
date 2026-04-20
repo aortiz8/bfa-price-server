@@ -379,6 +379,7 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
         'X-EBAY-API-DEV-NAME': devId,
         'X-EBAY-API-APP-NAME': clientId,
         'X-EBAY-API-CERT-NAME': clientSecret,
+        'User-Agent': 'BooksForAgesHealthCheck/1.0',
         'Content-Type': 'text/xml',
         'Content-Length': Buffer.byteLength(xml)
       }
@@ -1907,6 +1908,7 @@ var server = http.createServer(function(req, res) {
           'X-EBAY-API-DEV-NAME': devId || '',
           'X-EBAY-API-APP-NAME': clientId || '',
           'X-EBAY-API-CERT-NAME': clientSecret || '',
+          'User-Agent': 'BooksForAgesHealthCheck/1.0',
           'Content-Type': 'text/xml',
           'Content-Length': Buffer.byteLength(xml)
         }
