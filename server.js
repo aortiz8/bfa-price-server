@@ -1680,6 +1680,43 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── ADMIN: Wipe all test listings for a subscriber (BOTH collections) ──
+  // Requires confirm=YES to prevent accidental hits.
+  // Hit: /admin/wipe-test-listings?code=BOOKSFORAGES1!&confirm=YES
+  if (pathname === '/admin/wipe-test-listings' && req.method === 'GET') {
+    var wCode = (parsed.query.code || '').toUpperCase();
+    var wConfirm = parsed.query.confirm || '';
+    if (wConfirm !== 'YES') {
+      res.writeHead(200); res.end(JSON.stringify({
+        error: 'Missing confirm=YES. This endpoint deletes all listings data for the subscriber. Add &confirm=YES to proceed.'
+      }));
+      return;
+    }
+    getSubscriber(wCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        Promise.all([
+          database.collection('listings').deleteMany({ subscriberCode: wCode }),
+          database.collection('warehouse_inventory').deleteMany({ code: wCode })
+        ]).then(function(results){
+          res.writeHead(200); res.end(JSON.stringify({
+            success: true,
+            subscriberCode: wCode,
+            deleted: {
+              ebayToolListings: results[0].deletedCount || 0,
+              warehouseToolListings: results[1].deletedCount || 0
+            },
+            note: 'Database records only. Actual Amazon/eBay listings on those platforms are untouched.'
+          }));
+        }).catch(function(e){
+          res.writeHead(200); res.end(JSON.stringify({ error: e.message }));
+        });
+      });
+    });
+    return;
+  }
+
   // ── Debug: Check eBay token status and test against eBay API ──
   // Hit: /debug-ebay-token?code=BOOKSFORAGES1!
   if (pathname === '/debug-ebay-token' && req.method === 'GET') {
