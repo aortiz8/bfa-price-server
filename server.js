@@ -3457,8 +3457,17 @@ var server = http.createServer(function(req, res) {
             res.writeHead(200); res.end(JSON.stringify({ success: true }));
             return;
           }
-          database.collection('subscribers').updateOne({ code: code }, { $set: allowed })
-            .then(function() { res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+          // Case-insensitive match — subscriber may have been stored with different casing
+          var escapedCode = code.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          var codeFilter = { code: { $regex: new RegExp('^' + escapedCode + '$', 'i') } };
+          database.collection('subscribers').updateOne(codeFilter, { $set: allowed })
+            .then(function(result) {
+              if (result.matchedCount === 0) {
+                res.writeHead(200); res.end(JSON.stringify({ error: 'Save failed: no subscriber matched access code (case-sensitive issue?). Please contact support.' }));
+                return;
+              }
+              res.writeHead(200); res.end(JSON.stringify({ success: true, matched: result.matchedCount, modified: result.modifiedCount }));
+            })
             .catch(function(err) { res.writeHead(200); res.end(JSON.stringify({ error: err.message })); });
         });
       });
@@ -3487,21 +3496,12 @@ connectMongo(function(err) {
     console.log('MongoDB connection SUCCESS - db ready');
     // Always update token and core fields, but never overwrite policy IDs if already set
     db.collection('subscribers').updateOne(
-      { code: 'Booksforages1!' },
+      { code: { $regex: new RegExp('^Booksforages1!$', 'i') } },
       {
         $set: {
-          code: 'Booksforages1!',
           businessName: 'Books for Ages HQ',
           email: 'Codexbrothers@yahoo.com',
           active: true,
-          isAdmin: true,
-          employees: [
-            { name: 'Adam', pin: '8792' },
-            { name: 'Lizbeth', pin: '7284' },
-            { name: 'Josselin', pin: '9373' },
-            { name: 'Stephanie', pin: '3842' },
-            { name: 'Cris', pin: '8792' }
-          ],
           ebayClientId: CLIENT_ID,
           ebayClientSecret: CLIENT_SECRET,
           ebayDevId: DEV_ID,
@@ -3511,6 +3511,16 @@ connectMongo(function(err) {
           notes: 'Master admin account'
         },
         $setOnInsert: {
+          code: 'Booksforages1!',
+          isAdmin: true,
+          // Seed employees ONLY on first insert. Never overwrite existing on restart.
+          employees: [
+            { name: 'Adam', pin: '8792' },
+            { name: 'Lizbeth', pin: '7284' },
+            { name: 'Josselin', pin: '9373' },
+            { name: 'Stephanie', pin: '3842' },
+            { name: 'Cris', pin: '8792' }
+          ],
           ebayUserToken: USER_TOKEN
         }
       },
