@@ -2467,12 +2467,41 @@ var server = http.createServer(function(req, res) {
         var localMidnight = new Date(dateFilter + 'T00:00:00');
         var utcStart = new Date(localMidnight.getTime() + offsetMinutes * 60000).toISOString();
         var utcEnd = new Date(localMidnight.getTime() + offsetMinutes * 60000 + 86400000).toISOString();
-        database.collection('listings').find({
-          subscriberCode: code,
-          createdAt: { $gte: utcStart, $lt: utcEnd }
-        }).sort({ createdAt: -1 }).toArray()
-          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify(listings)); })
-          .catch(function() { res.writeHead(200); res.end('[]'); });
+        var utcStartDate = new Date(utcStart);
+        var utcEndDate = new Date(utcEnd);
+        // Query BOTH collections in parallel
+        Promise.all([
+          database.collection('listings').find({
+            subscriberCode: code,
+            createdAt: { $gte: utcStart, $lt: utcEnd }
+          }).sort({ createdAt: -1 }).toArray(),
+          database.collection('warehouse_inventory').find({
+            code: code,
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+          }).sort({ createdAt: -1 }).toArray()
+        ]).then(function(results){
+          var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
+          var warehouseToolItems = (results[1] || []).map(function(l){
+            // normalize shape so frontend can render the same way
+            return {
+              source: 'warehouse-tool',
+              subscriberCode: l.code,
+              employee: l.employee || '',
+              bookTitle: l.title || '',
+              title: l.title || '',
+              condition: l.condition || '',
+              price: l.price || 0,
+              isbn: l.isbn || '',
+              sku: l.sku || '',
+              date: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt || '').split('T')[0],
+              createdAt: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt),
+              listedOn: l.listedOn || []
+            };
+          });
+          var merged = ebayToolItems.concat(warehouseToolItems)
+            .sort(function(a,b){ return (b.createdAt || '').localeCompare(a.createdAt || ''); });
+          res.writeHead(200); res.end(JSON.stringify(merged));
+        }).catch(function(){ res.writeHead(200); res.end('[]'); });
       });
     });
     return;
@@ -2485,7 +2514,7 @@ var server = http.createServer(function(req, res) {
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       connectMongo(function(err, database) {
-        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ count: 0 })); return; }
+        if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ count: 0, ebayTool: 0, warehouseTool: 0 })); return; }
         // Calculate start and end of current local month in UTC
         var now = new Date();
         var localNow = new Date(now.getTime() - offsetMinutes * 60000);
@@ -2493,12 +2522,26 @@ var server = http.createServer(function(req, res) {
         var monthEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 1));
         var utcStart = new Date(monthStart.getTime() + offsetMinutes * 60000).toISOString();
         var utcEnd = new Date(monthEnd.getTime() + offsetMinutes * 60000).toISOString();
-        database.collection('listings').countDocuments({
-          subscriberCode: code,
-          createdAt: { $gte: utcStart, $lt: utcEnd }
-        })
-          .then(function(count) { res.writeHead(200); res.end(JSON.stringify({ count: count })); })
-          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ count: 0 })); });
+        var utcStartDate = new Date(utcStart);
+        var utcEndDate = new Date(utcEnd);
+        Promise.all([
+          database.collection('listings').countDocuments({
+            subscriberCode: code,
+            createdAt: { $gte: utcStart, $lt: utcEnd }
+          }),
+          database.collection('warehouse_inventory').countDocuments({
+            code: code,
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+          })
+        ]).then(function(results){
+          var ebayTool = results[0] || 0;
+          var warehouseTool = results[1] || 0;
+          res.writeHead(200); res.end(JSON.stringify({
+            count: ebayTool + warehouseTool,  // kept for backwards compat
+            ebayTool: ebayTool,
+            warehouseTool: warehouseTool
+          }));
+        }).catch(function() { res.writeHead(200); res.end(JSON.stringify({ count: 0, ebayTool: 0, warehouseTool: 0 })); });
       });
     });
     return;
@@ -2521,13 +2564,40 @@ var server = http.createServer(function(req, res) {
         var nextMonday = new Date(monday.getTime() + 7 * 86400000);
         var utcStart = new Date(monday.getTime() + offsetMinutes * 60000).toISOString();
         var utcEnd = new Date(nextMonday.getTime() + offsetMinutes * 60000).toISOString();
+        var utcStartDate = new Date(utcStart);
+        var utcEndDate = new Date(utcEnd);
         var weekLabel = 'Week of ' + monday.toISOString().split('T')[0] + ' – ' + new Date(nextMonday - 86400000).toISOString().split('T')[0];
-        database.collection('listings').find({
-          subscriberCode: code,
-          createdAt: { $gte: utcStart, $lt: utcEnd }
-        }).sort({ createdAt: -1 }).toArray()
-          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify({ listings: listings, weekLabel: weekLabel })); })
-          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [], weekLabel: weekLabel })); });
+        Promise.all([
+          database.collection('listings').find({
+            subscriberCode: code,
+            createdAt: { $gte: utcStart, $lt: utcEnd }
+          }).sort({ createdAt: -1 }).toArray(),
+          database.collection('warehouse_inventory').find({
+            code: code,
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+          }).sort({ createdAt: -1 }).toArray()
+        ]).then(function(results){
+          var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
+          var warehouseToolItems = (results[1] || []).map(function(l){
+            return {
+              source: 'warehouse-tool',
+              subscriberCode: l.code,
+              employee: l.employee || '',
+              bookTitle: l.title || '',
+              title: l.title || '',
+              condition: l.condition || '',
+              price: l.price || 0,
+              isbn: l.isbn || '',
+              sku: l.sku || '',
+              date: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt || '').split('T')[0],
+              createdAt: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt),
+              listedOn: l.listedOn || []
+            };
+          });
+          var merged = ebayToolItems.concat(warehouseToolItems)
+            .sort(function(a,b){ return (b.createdAt || '').localeCompare(a.createdAt || ''); });
+          res.writeHead(200); res.end(JSON.stringify({ listings: merged, weekLabel: weekLabel }));
+        }).catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [], weekLabel: weekLabel })); });
       });
     });
     return;
@@ -2547,12 +2617,38 @@ var server = http.createServer(function(req, res) {
         var monthEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() + 1, 1));
         var utcStart = new Date(monthStart.getTime() + offsetMinutes * 60000).toISOString();
         var utcEnd = new Date(monthEnd.getTime() + offsetMinutes * 60000).toISOString();
-        database.collection('listings').find({
-          subscriberCode: code,
-          createdAt: { $gte: utcStart, $lt: utcEnd }
-        }).toArray()
-          .then(function(listings) { res.writeHead(200); res.end(JSON.stringify({ listings: listings })); })
-          .catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [] })); });
+        var utcStartDate = new Date(utcStart);
+        var utcEndDate = new Date(utcEnd);
+        Promise.all([
+          database.collection('listings').find({
+            subscriberCode: code,
+            createdAt: { $gte: utcStart, $lt: utcEnd }
+          }).toArray(),
+          database.collection('warehouse_inventory').find({
+            code: code,
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+          }).toArray()
+        ]).then(function(results){
+          var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
+          var warehouseToolItems = (results[1] || []).map(function(l){
+            return {
+              source: 'warehouse-tool',
+              subscriberCode: l.code,
+              employee: l.employee || '',
+              bookTitle: l.title || '',
+              title: l.title || '',
+              condition: l.condition || '',
+              price: l.price || 0,
+              isbn: l.isbn || '',
+              sku: l.sku || '',
+              date: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt || '').split('T')[0],
+              createdAt: (l.createdAt instanceof Date ? l.createdAt.toISOString() : l.createdAt),
+              listedOn: l.listedOn || []
+            };
+          });
+          var merged = ebayToolItems.concat(warehouseToolItems);
+          res.writeHead(200); res.end(JSON.stringify({ listings: merged }));
+        }).catch(function() { res.writeHead(200); res.end(JSON.stringify({ listings: [] })); });
       });
     });
     return;
