@@ -362,28 +362,30 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
   if(!userToken){ cb({ ok: false, error: 'Missing eBay User Token' }); return; }
   if(!devId){ cb({ ok: false, error: 'Missing eBay Dev ID' }); return; }
   if(!clientId || !clientSecret){ cb({ ok: false, error: 'Missing eBay App ID or Cert ID' }); return; }
+  // OAuth IAF tokens start with "v^1.1" — they must be sent in X-EBAY-API-IAF-TOKEN header,
+  // NOT inside the <eBayAuthToken> XML element. Legacy Auth'n'Auth tokens use XML.
+  var isIafToken = userToken.substring(0, 5) === 'v^1.1';
   var xml = '<?xml version="1.0" encoding="utf-8"?>'
     + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-    + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
+    + (isIafToken ? '' : '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>')
     + '</GeteBayOfficialTimeRequest>';
   var attempt = 0;
   var maxAttempts = 3;
   function tryOnce(){
     attempt++;
-    var opts = {
-      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-      headers: {
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-        'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
-        'X-EBAY-API-DEV-NAME': devId,
-        'X-EBAY-API-APP-NAME': clientId,
-        'X-EBAY-API-CERT-NAME': clientSecret,
-        'User-Agent': 'BooksForAgesHealthCheck/1.0',
-        'Content-Type': 'text/xml',
-        'Content-Length': Buffer.byteLength(xml)
-      }
+    var headers = {
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+      'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+      'X-EBAY-API-DEV-NAME': devId,
+      'X-EBAY-API-APP-NAME': clientId,
+      'X-EBAY-API-CERT-NAME': clientSecret,
+      'User-Agent': 'BooksForAgesHealthCheck/1.0',
+      'Content-Type': 'text/xml',
+      'Content-Length': Buffer.byteLength(xml)
     };
+    if(isIafToken) headers['X-EBAY-API-IAF-TOKEN'] = userToken;
+    var opts = { hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST', headers: headers };
     var tReq = https.request(opts, function(r){
       var data = '';
       r.on('data', function(c){ data += c; });
@@ -408,7 +410,7 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
         else if(shortMsg) errMsg = shortMsg[1];
         else if(errCode) errMsg = 'Error code ' + errCode[1];
         else if(ack) errMsg = 'Ack=' + ack[1];
-        else if(r.statusCode === 503) errMsg = 'eBay CDN 503 (transient) after ' + attempt + ' attempts';
+        else if(r.statusCode === 503) errMsg = 'eBay CDN 503 after ' + attempt + ' attempts';
         else if(r.statusCode !== 200) errMsg = 'HTTP ' + r.statusCode;
         else errMsg = 'unrecognized response';
         cb({ ok: false, error: 'Trading API: ' + errMsg.substring(0, 200) });
@@ -1895,24 +1897,25 @@ var server = http.createServer(function(req, res) {
         hasUserToken: !!userToken, userTokenLen: userToken ? userToken.length : 0, userTokenFirst: userToken ? userToken.substring(0,20) + '...' : null,
         hasDevId: !!devId, devIdFirst: devId ? devId.substring(0,12) + '...' : null
       };
+      var isIafToken2 = userToken && userToken.substring(0,5) === 'v^1.1';
+      info.tokenFormat = isIafToken2 ? 'OAuth IAF (using X-EBAY-API-IAF-TOKEN header)' : 'Auth\'n\'Auth (using XML element)';
       var xml = '<?xml version="1.0" encoding="utf-8"?>'
         + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-        + '<RequesterCredentials><eBayAuthToken>' + (userToken || '') + '</eBayAuthToken></RequesterCredentials>'
+        + (isIafToken2 ? '' : '<RequesterCredentials><eBayAuthToken>' + (userToken || '') + '</eBayAuthToken></RequesterCredentials>')
         + '</GeteBayOfficialTimeRequest>';
-      var opts = {
-        hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-        headers: {
-          'X-EBAY-API-SITEID': '0',
-          'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-          'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
-          'X-EBAY-API-DEV-NAME': devId || '',
-          'X-EBAY-API-APP-NAME': clientId || '',
-          'X-EBAY-API-CERT-NAME': clientSecret || '',
-          'User-Agent': 'BooksForAgesHealthCheck/1.0',
-          'Content-Type': 'text/xml',
-          'Content-Length': Buffer.byteLength(xml)
-        }
+      var dbgHeaders = {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+        'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+        'X-EBAY-API-DEV-NAME': devId || '',
+        'X-EBAY-API-APP-NAME': clientId || '',
+        'X-EBAY-API-CERT-NAME': clientSecret || '',
+        'User-Agent': 'BooksForAgesHealthCheck/1.0',
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
       };
+      if(isIafToken2) dbgHeaders['X-EBAY-API-IAF-TOKEN'] = userToken;
+      var opts = { hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST', headers: dbgHeaders };
       var tReq = https.request(opts, function(r){
         var data = '';
         r.on('data', function(c){ data += c; });
