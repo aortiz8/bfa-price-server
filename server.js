@@ -366,28 +366,38 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
     + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
     + '</GeteBayOfficialTimeRequest>';
-  var opts = {
-    hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-    headers: {
-      'X-EBAY-API-SITEID': '0',
-      'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-      'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
-      'X-EBAY-API-DEV-NAME': devId,
-      'X-EBAY-API-APP-NAME': clientId,
-      'X-EBAY-API-CERT-NAME': clientSecret,
-      'Content-Type': 'text/xml',
-      'Content-Length': Buffer.byteLength(xml)
-    }
-  };
-  var tReq = https.request(opts, function(r){
-    var data = '';
-    r.on('data', function(c){ data += c; });
-    r.on('end', function(){
-      // Look for Ack=Success or Timestamp in response; error comes back as <LongMessage>
-      if(/<Ack>Success<\/Ack>/.test(data) || /<Timestamp>/.test(data)){
-        cb({ ok: true });
-      } else {
-        // Try multiple error patterns eBay uses
+  var attempt = 0;
+  var maxAttempts = 3;
+  function tryOnce(){
+    attempt++;
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
+        'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+        'X-EBAY-API-DEV-NAME': devId,
+        'X-EBAY-API-APP-NAME': clientId,
+        'X-EBAY-API-CERT-NAME': clientSecret,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var tReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        // Success
+        if(/<Ack>Success<\/Ack>/.test(data) || /<Timestamp>/.test(data)){
+          cb({ ok: true }); return;
+        }
+        // Transient 503 from Akamai — retry
+        if(r.statusCode === 503 && attempt < maxAttempts){
+          console.log('eBay Trading API 503, retry ' + attempt + '/' + maxAttempts);
+          setTimeout(tryOnce, 1500 * attempt);
+          return;
+        }
+        // Parse whatever error we got
         var longMsg = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
         var shortMsg = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
         var errCode = data.match(/<ErrorCode>([^<]+)<\/ErrorCode>/);
@@ -397,15 +407,24 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
         else if(shortMsg) errMsg = shortMsg[1];
         else if(errCode) errMsg = 'Error code ' + errCode[1];
         else if(ack) errMsg = 'Ack=' + ack[1];
+        else if(r.statusCode === 503) errMsg = 'eBay CDN 503 (transient) after ' + attempt + ' attempts';
         else if(r.statusCode !== 200) errMsg = 'HTTP ' + r.statusCode;
-        else errMsg = 'unrecognized response: ' + data.substring(0, 150).replace(/\s+/g, ' ');
+        else errMsg = 'unrecognized response';
         cb({ ok: false, error: 'Trading API: ' + errMsg.substring(0, 200) });
-      }
+      });
     });
-  });
-  tReq.on('error', function(e){ cb({ ok: false, error: 'Trading API network: ' + e.message }); });
-  tReq.setTimeout(10000, function(){ tReq.destroy(); cb({ ok: false, error: 'Trading API timeout' }); });
-  tReq.write(xml); tReq.end();
+    tReq.on('error', function(e){
+      if(attempt < maxAttempts){ setTimeout(tryOnce, 1500 * attempt); return; }
+      cb({ ok: false, error: 'Trading API network: ' + e.message });
+    });
+    tReq.setTimeout(12000, function(){
+      tReq.destroy();
+      if(attempt < maxAttempts){ setTimeout(tryOnce, 1500 * attempt); return; }
+      cb({ ok: false, error: 'Trading API timeout' });
+    });
+    tReq.write(xml); tReq.end();
+  }
+  tryOnce();
 }
 
 // Test #3: eBay Business Policies are saved
