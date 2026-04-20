@@ -249,51 +249,78 @@ function sendEmail(to, subject, html, cb) {
 }
 
 // ── eBay OAuth Auto-Refresh (every 110 minutes) ──
+// Refresh one subscriber's eBay access token using their stored refresh token.
+// cb receives (err, newAccessToken). Also updates MongoDB.
+function refreshEbayTokenForSubscriber(sub, cb) {
+  cb = cb || function(){};
+  if (!sub || !sub.ebayRefreshToken) { cb('no-refresh-token'); return; }
+  var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
+  var body = 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(sub.ebayRefreshToken);
+  var opts = {
+    hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Authorization': 'Basic ' + credentials,
+      'Content-Length': Buffer.byteLength(body)
+    }
+  };
+  var req2 = https.request(opts, function(r) {
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if (json.access_token) {
+          var newExpiry = new Date(Date.now() + (json.expires_in || 7200) * 1000).toISOString();
+          connectMongo(function(err, database){
+            if (err || !database) { cb(null, json.access_token); return; }
+            database.collection('subscribers').updateOne(
+              { code: sub.code },
+              { $set: { ebayOAuthToken: json.access_token, ebayOAuthExpiry: newExpiry } }
+            )
+            .then(function(){
+              console.log('eBay token refreshed for:', sub.code);
+              cb(null, json.access_token);
+            })
+            .catch(function(e){
+              console.log('Token save error:', e.message);
+              cb(null, json.access_token); // token is good even if save fails
+            });
+          });
+        } else {
+          console.log('Token refresh failed for', sub.code, ':', data.substring(0, 200));
+          cb('refresh-failed: ' + data.substring(0, 200));
+        }
+      } catch(e){
+        console.log('Token refresh parse error:', e.message);
+        cb('parse-error: ' + e.message);
+      }
+    });
+  });
+  req2.on('error', function(e){
+    console.log('Token refresh request error:', e.message);
+    cb('network-error: ' + e.message);
+  });
+  req2.setTimeout(15000, function(){ req2.destroy(); cb('timeout'); });
+  req2.write(body); req2.end();
+}
+
 function refreshAllEbayTokens() {
   connectMongo(function(err, database) {
     if (err || !database) return;
     database.collection('subscribers').find({ ebayRefreshToken: { $exists: true, $ne: '' } }).toArray()
     .then(function(subs) {
       subs.forEach(function(sub) {
-        if (!sub.ebayRefreshToken) return;
-        var credentials = Buffer.from(CLIENT_ID + ':' + CLIENT_SECRET).toString('base64');
-        var body = 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(sub.ebayRefreshToken);
-        var opts = {
-          hostname: 'api.ebay.com', path: '/identity/v1/oauth2/token', method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Authorization': 'Basic ' + credentials,
-            'Content-Length': Buffer.byteLength(body)
-          }
-        };
-        var req2 = https.request(opts, function(r) {
-          var data = '';
-          r.on('data', function(c){ data += c; });
-          r.on('end', function(){
-            try {
-              var json = JSON.parse(data);
-              if (json.access_token) {
-                database.collection('subscribers').updateOne(
-                  { code: sub.code },
-                  { $set: { ebayOAuthToken: json.access_token, ebayOAuthExpiry: new Date(Date.now() + (json.expires_in || 7200) * 1000).toISOString() } }
-                ).then(function(){ console.log('eBay token refreshed for:', sub.code); })
-                .catch(function(e){ console.log('Token save error:', e.message); });
-              } else {
-                console.log('Token refresh failed for', sub.code, ':', data.substring(0, 200));
-              }
-            } catch(e){ console.log('Token refresh parse error:', e.message); }
-          });
-        });
-        req2.on('error', function(e){ console.log('Token refresh request error:', e.message); });
-        req2.write(body); req2.end();
+        refreshEbayTokenForSubscriber(sub, function(){});
       });
     })
     .catch(function(e){ console.log('Token refresh DB error:', e.message); });
   });
 }
 
-// Run token refresh every 110 minutes (tokens last 2 hours)
-setInterval(refreshAllEbayTokens, 110 * 60 * 1000);
+// Run token refresh shortly after startup (30s grace so DB is ready), then every 90 minutes
+setTimeout(refreshAllEbayTokens, 30 * 1000);
+setInterval(refreshAllEbayTokens, 90 * 60 * 1000);
 
 // Schedule daily reports at 8pm
 function scheduleDailyReports() {
@@ -694,6 +721,7 @@ var server = http.createServer(function(req, res) {
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+      var hasRetriedAuth = false;
       // Get snoozed order IDs from MongoDB
       connectMongo(function(err, database) {
         var snoozedIds = [];
@@ -713,6 +741,21 @@ var server = http.createServer(function(req, res) {
               var data = '';
               r.on('data', function(c){ data += c; });
               r.on('end', function(){
+                // Auto-refresh + retry on 401
+                if (r.statusCode === 401 && !hasRetriedAuth && sub.ebayRefreshToken) {
+                  hasRetriedAuth = true;
+                  console.log('eBay picklist 401 — refreshing token and retrying for', code);
+                  refreshEbayTokenForSubscriber(sub, function(refreshErr, newToken){
+                    if (refreshErr || !newToken) {
+                      res.writeHead(200); res.end(JSON.stringify({ error: 'eBay token expired and auto-refresh failed. Please reconnect eBay in the portal.', orders: [] }));
+                      return;
+                    }
+                    userToken = newToken;
+                    allOrders = [];
+                    fetchOrders(0);
+                  });
+                  return;
+                }
                 try {
                   var json = JSON.parse(data);
                   if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
@@ -815,6 +858,7 @@ var server = http.createServer(function(req, res) {
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+      var hasRetriedAuth = false;
 
       // Calculate date range
       var now = new Date();
@@ -863,6 +907,21 @@ var server = http.createServer(function(req, res) {
           var data = '';
           r.on('data', function(c){ data += c; });
           r.on('end', function(){
+            // Auto-refresh + retry on 401
+            if (r.statusCode === 401 && !hasRetriedAuth && sub.ebayRefreshToken) {
+              hasRetriedAuth = true;
+              console.log('eBay sales 401 — refreshing token and retrying for', code);
+              refreshEbayTokenForSubscriber(sub, function(refreshErr, newToken){
+                if (refreshErr || !newToken) {
+                  res.writeHead(200); res.end(JSON.stringify({ error: 'eBay token expired and auto-refresh failed. Please reconnect eBay in the portal.', orders: [] }));
+                  return;
+                }
+                userToken = newToken;
+                allOrders = []; // reset accumulator
+                fetchOrders(0); // retry from start
+              });
+              return;
+            }
             try {
               var json = JSON.parse(data);
               if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
