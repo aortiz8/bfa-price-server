@@ -1623,6 +1623,35 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Debug: Read back what Amazon has stored for a SKU (includes issues + attributes) ──
+  // Hit: /warehouse/debug-amazon-getitem?sku=bfa.4r3q
+  if (pathname === '/warehouse/debug-amazon-getitem' && req.method === 'GET') {
+    var gSku = parsed.query.sku || '';
+    if(!gSku){ res.writeHead(400); res.end(JSON.stringify({ error: 'sku required' })); return; }
+    getAmazonAccessToken(function(err, accessToken){
+      if(err){ res.writeHead(200); res.end(JSON.stringify({ error: err })); return; }
+      var gPath = '/listings/2021-08-01/items/' + encodeURIComponent(AMAZON_SELLER_ID) + '/' + encodeURIComponent(gSku)
+                + '?marketplaceIds=' + AMAZON_MARKETPLACE_ID
+                + '&includedData=summaries,attributes,issues,offers,fulfillmentAvailability';
+      var gReq = https.request({
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: gPath,
+        method: 'GET',
+        headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
+      }, function(gRes){
+        var gData = ''; gRes.on('data', function(c){ gData += c; });
+        gRes.on('end', function(){
+          console.log('Amazon GET item:', gRes.statusCode, gData.substring(0, 2000));
+          var gJson; try { gJson = JSON.parse(gData); } catch(e){ gJson = { raw: gData }; }
+          res.writeHead(200); res.end(JSON.stringify({ status: gRes.statusCode, item: gJson }, null, 2));
+        });
+      });
+      gReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      gReq.end();
+    });
+    return;
+  }
+
   // ── Debug: Get Amazon product type requirements ──
   if (pathname === '/warehouse/amazon-requirements' && req.method === 'GET') {
     getAmazonAccessToken(function(err, accessToken){
