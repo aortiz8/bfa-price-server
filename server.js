@@ -3544,6 +3544,28 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Subscriber self-service: update own settings ──
+  // Delete items from warehouse_inventory by SKU.
+  // Admin-only. Used to remove test or incorrect backfill entries.
+  // POST /my/delete-inventory  body: { code, skus: ["SHM.5STL", ...] }
+  if (pathname === '/my/delete-inventory' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var dCode = (data.code || '').toUpperCase();
+      var session = getRequestSession(req, parsed);
+      if(!session || session.role !== 'admin' || session.subscriberCode !== dCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var skus = Array.isArray(data.skus) ? data.skus.map(function(s){ return (s||'').trim(); }).filter(Boolean) : [];
+      if(!skus.length){ res.writeHead(400); res.end(JSON.stringify({ error: 'No SKUs provided.' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('warehouse_inventory').deleteMany({ sku: { $in: skus } })
+          .then(function(r){ res.writeHead(200); res.end(JSON.stringify({ deleted: r.deletedCount, requested: skus.length })); })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
   // Bulk-upsert SKU → location mappings into warehouse_inventory.
   // Admin-only. Used to backfill locations for items listed before location tracking existed.
   // POST /my/backfill-locations  body: { code, entries: [{sku, row, section, sequence}, ...] }
