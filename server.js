@@ -1621,6 +1621,100 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Debug: Check eBay token status and test against eBay API ──
+  // Hit: /debug-ebay-token?code=BOOKSFORAGES1!
+  if (pathname === '/debug-ebay-token' && req.method === 'GET') {
+    var eCode = (parsed.query.code || '').toUpperCase();
+    getSubscriber(eCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+
+      var result = {
+        subscriberCode: eCode,
+        hasOAuthToken: !!sub.ebayOAuthToken,
+        hasRefreshToken: !!sub.ebayRefreshToken,
+        hasUserToken: !!sub.ebayUserToken,
+        oauthExpiry: sub.ebayOAuthExpiry || null,
+        oauthExpiryPassed: null,
+        tokenFirstChars: null,
+        tokenUsedInTest: null,
+        testCall: { status: null, error: null, response: null }
+      };
+
+      if(sub.ebayOAuthExpiry){
+        result.oauthExpiryPassed = new Date(sub.ebayOAuthExpiry) < new Date();
+      }
+
+      // Which token will actually be used for sales calls
+      var tokenToTest = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+      result.tokenUsedInTest = sub.ebayOAuthToken ? 'ebayOAuthToken (OAuth)'
+                             : sub.ebayUserToken ? 'ebayUserToken (legacy)'
+                             : 'USER_TOKEN (server default)';
+      result.tokenFirstChars = tokenToTest ? (tokenToTest.substring(0, 20) + '...') : null;
+
+      if(!tokenToTest){
+        result.testCall.error = 'No token found — subscriber has never connected eBay';
+        res.writeHead(200); res.end(JSON.stringify(result, null, 2)); return;
+      }
+
+      // Make a tiny test call to eBay: fetch 1 order from last 24hrs
+      var yesterdayIso = new Date(Date.now() - 86400000).toISOString();
+      var testPath = '/sell/fulfillment/v1/order?filter='
+                   + encodeURIComponent('creationdate:[' + yesterdayIso + '..]')
+                   + '&limit=1';
+      var testReq = https.request({
+        hostname: 'api.ebay.com',
+        path: testPath,
+        method: 'GET',
+        headers: {
+          'Authorization': 'Bearer ' + tokenToTest,
+          'Content-Type': 'application/json',
+          'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+        }
+      }, function(r){
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          result.testCall.status = r.statusCode;
+          try {
+            var json = JSON.parse(data);
+            result.testCall.response = json;
+            if(json.errors && json.errors[0]){
+              result.testCall.error = json.errors[0].message || json.errors[0].longMessage;
+            }
+          } catch(e){
+            result.testCall.response = data.substring(0, 300);
+            result.testCall.error = 'Non-JSON response';
+          }
+
+          // Diagnose
+          if(r.statusCode === 200){
+            result.diagnosis = 'TOKEN OK — eBay API call succeeded. Sales data should be available.';
+          } else if(r.statusCode === 401){
+            result.diagnosis = 'TOKEN REJECTED BY EBAY — token is expired, revoked, or malformed. Reconnect via portal.';
+          } else if(r.statusCode === 403){
+            result.diagnosis = 'TOKEN LACKS SCOPE — token is valid but missing sell.fulfillment scope. Reconnect to request all scopes.';
+          } else if(r.statusCode === 400){
+            result.diagnosis = 'BAD REQUEST — token may be fine, but request parameters rejected.';
+          } else {
+            result.diagnosis = 'Unexpected status ' + r.statusCode;
+          }
+          res.writeHead(200); res.end(JSON.stringify(result, null, 2));
+        });
+      });
+      testReq.on('error', function(e){
+        result.testCall.error = 'Network error: ' + e.message;
+        res.writeHead(200); res.end(JSON.stringify(result, null, 2));
+      });
+      testReq.setTimeout(15000, function(){
+        testReq.destroy();
+        result.testCall.error = 'Request timeout';
+        res.writeHead(200); res.end(JSON.stringify(result, null, 2));
+      });
+      testReq.end();
+    });
+    return;
+  }
+
   // ── Debug: Read back what Amazon has stored for a SKU (includes issues + attributes) ──
   // Hit: /warehouse/debug-amazon-getitem?sku=bfa.4r3q
   if (pathname === '/warehouse/debug-amazon-getitem' && req.method === 'GET') {
