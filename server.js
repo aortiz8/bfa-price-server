@@ -963,6 +963,169 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── eBay Pick List ──
+  // ── Amazon Pick List ──
+  // Returns Amazon MFN (seller-shipped) orders that are Unshipped.
+  // Fetches item details (SKU, title) per order, caching in MongoDB to avoid re-fetching.
+  if (pathname === '/my/amazon/picklist' && req.method === 'GET') {
+    var aCode = (parsed.query.code || '').toUpperCase();
+    getSubscriber(aCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+      getAmazonAccessToken(function(tokenErr, accessToken){
+        if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, pending: [] })); return; }
+        connectMongo(function(dbErr, database){
+          // 30-day window for outstanding orders
+          var thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+          var snoozedPromise = database
+            ? database.collection('snoozed_orders').find({ subscriberCode: aCode }).toArray()
+            : Promise.resolve([]);
+          snoozedPromise.then(function(snoozed){
+            var snoozedIds = (snoozed || []).map(function(s){ return s.orderId; });
+            // 1) Fetch Amazon orders
+            var allOrders = [];
+            function fetchOrders(nextToken){
+              var qp = 'MarketplaceIds=' + marketplaceId
+                     + '&CreatedAfter=' + encodeURIComponent(thirtyDaysAgo)
+                     + '&OrderStatuses=Unshipped,PartiallyShipped';
+              if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
+              var opts = {
+                hostname: 'sellingpartnerapi-na.amazon.com',
+                path: '/orders/v0/orders?' + qp,
+                method: 'GET',
+                headers: { 'x-amz-access-token': accessToken }
+              };
+              var aReq = https.request(opts, function(r){
+                var data = '';
+                r.on('data', function(c){ data += c; });
+                r.on('end', function(){
+                  try {
+                    var json = JSON.parse(data);
+                    if(json.errors && json.errors[0]){
+                      res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].message || json.errors[0].code, pending: [] })); return;
+                    }
+                    var payload = json.payload || {};
+                    var orders = (payload.Orders || []).filter(function(o){
+                      // MFN only — skip Amazon-Fulfilled (FBA) since Amazon ships those
+                      return o.FulfillmentChannel === 'MFN' && snoozedIds.indexOf(o.AmazonOrderId) === -1;
+                    });
+                    allOrders = allOrders.concat(orders);
+                    if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
+                    // 2) For each order, get items (with MongoDB cache)
+                    enrichAndRespond();
+                  } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', pending: [] })); }
+                });
+              });
+              aReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, pending: [] })); });
+              aReq.setTimeout(20000, function(){ aReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', pending: [] })); });
+              aReq.end();
+            }
+
+            function enrichAndRespond(){
+              if(!allOrders.length){
+                res.writeHead(200); res.end(JSON.stringify({ pending: [], canceled: [], actionNeeded: [] })); return;
+              }
+              // Look up cached items for these orders in MongoDB
+              var orderIds = allOrders.map(function(o){ return o.AmazonOrderId; });
+              var cachedById = {};
+              var cacheFetch = database
+                ? database.collection('amazon_order_items_cache').find({ orderId: { $in: orderIds } }).toArray()
+                : Promise.resolve([]);
+              cacheFetch.then(function(rows){
+                (rows || []).forEach(function(r){ cachedById[r.orderId] = r; });
+                // Determine which need live fetch
+                var toFetch = allOrders.filter(function(o){ return !cachedById[o.AmazonOrderId]; });
+                // Fetch with 2 concurrent at a time (rate limit friendly)
+                var concurrency = 2;
+                var idx = 0;
+                var active = 0;
+                function startNext(){
+                  while(active < concurrency && idx < toFetch.length){
+                    var order = toFetch[idx++];
+                    active++;
+                    fetchOrderItems(order.AmazonOrderId, function(itemInfo){
+                      active--;
+                      cachedById[order.AmazonOrderId] = itemInfo;
+                      // Save to cache (fire-and-forget)
+                      if(database){
+                        database.collection('amazon_order_items_cache').updateOne(
+                          { orderId: order.AmazonOrderId },
+                          { $set: Object.assign({ orderId: order.AmazonOrderId, cachedAt: new Date() }, itemInfo) },
+                          { upsert: true }
+                        ).catch(function(){});
+                      }
+                      if(idx >= toFetch.length && active === 0){ finish(); }
+                      else { startNext(); }
+                    });
+                  }
+                  if(toFetch.length === 0){ finish(); }
+                }
+                function finish(){
+                  var now = new Date();
+                  var pending = allOrders.map(function(o){
+                    var cached = cachedById[o.AmazonOrderId] || {};
+                    var created = new Date(o.PurchaseDate);
+                    var ageHours = Math.round((now - created) / 3600000 * 10) / 10;
+                    var skuRaw = cached.sku || '';
+                    var skuPrefix = skuRaw.split(/[-\.]/)[0] || skuRaw;
+                    return {
+                      orderId: o.AmazonOrderId,
+                      orderDate: o.PurchaseDate,
+                      ageHours: ageHours,
+                      platform: 'Amazon',
+                      title: cached.title || '',
+                      sku: skuRaw,
+                      skuPrefix: skuPrefix,
+                      price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
+                      condition: cached.condition || '',
+                      cancelState: 'NONE_REQUESTED'
+                    };
+                  });
+                  res.writeHead(200); res.end(JSON.stringify({
+                    pending: pending,
+                    canceled: [],
+                    actionNeeded: []
+                  }));
+                }
+                startNext();
+              }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ error: 'Cache read error', pending: [] })); });
+            }
+
+            function fetchOrderItems(orderId, cb){
+              var opts = {
+                hostname: 'sellingpartnerapi-na.amazon.com',
+                path: '/orders/v0/orders/' + encodeURIComponent(orderId) + '/orderItems',
+                method: 'GET',
+                headers: { 'x-amz-access-token': accessToken }
+              };
+              var iReq = https.request(opts, function(r){
+                var data = '';
+                r.on('data', function(c){ data += c; });
+                r.on('end', function(){
+                  try {
+                    var json = JSON.parse(data);
+                    var items = ((json.payload || {}).OrderItems) || [];
+                    var item = items[0] || {};
+                    cb({
+                      sku: item.SellerSKU || '',
+                      title: item.Title || '',
+                      condition: item.ConditionId || ''
+                    });
+                  } catch(e){ cb({ sku: '', title: '', condition: '' }); }
+                });
+              });
+              iReq.on('error', function(){ cb({ sku: '', title: '', condition: '' }); });
+              iReq.setTimeout(10000, function(){ iReq.destroy(); cb({ sku: '', title: '', condition: '' }); });
+              iReq.end();
+            }
+
+            fetchOrders(null);
+          }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ error: 'Snoozed lookup failed', pending: [] })); });
+        });
+      });
+    });
+    return;
+  }
+
   if (pathname === '/my/ebay/picklist' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     getSubscriber(code, function(err, sub) {
