@@ -355,20 +355,56 @@ function testEbayBrowseApi(clientId, clientSecret, cb){
   tReq.write(body); tReq.end();
 }
 
-// Test #2: eBay Trading API (AddItem / UploadSiteHostedPictures use this auth)
-// Uses GeteBayOfficialTime — a zero-cost verb that validates all 4 credentials at once
-// (eBayAuthToken + DevID + AppID + CertID). If it returns an ItemID-less success, creds work.
-function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
+// Test #2: eBay Trading API LIVE TEST via VerifyAddItem
+// VerifyAddItem uses the exact same code path as AddItem but only validates — doesn't create.
+// This is the most accurate real-time test because it exercises auth + business policies + item validation.
+// Uses a minimal test book payload that's realistic enough to get past Akamai's bot filter.
+function testEbayTradingApi(sub, cb){
+  var userToken = sub.ebayUserToken || USER_TOKEN;
+  var devId = sub.ebayDevId || DEV_ID;
+  var clientId = sub.ebayClientId || CLIENT_ID;
+  var clientSecret = sub.ebayClientSecret || CLIENT_SECRET;
+  var shippingPolicyId = sub.ebayShippingPolicyId;
+  var paymentPolicyId = sub.ebayPaymentPolicyId;
+  var returnPolicyId = sub.ebayReturnPolicyId;
+
   if(!userToken){ cb({ ok: false, error: 'Missing eBay User Token' }); return; }
   if(!devId){ cb({ ok: false, error: 'Missing eBay Dev ID' }); return; }
-  if(!clientId || !clientSecret){ cb({ ok: false, error: 'Missing eBay App ID or Cert ID' }); return; }
-  // OAuth IAF tokens start with "v^1.1" — they must be sent in X-EBAY-API-IAF-TOKEN header,
-  // NOT inside the <eBayAuthToken> XML element. Legacy Auth'n'Auth tokens use XML.
+  if(!clientId || !clientSecret){ cb({ ok: false, error: 'Missing App ID or Cert ID' }); return; }
+  // VerifyAddItem needs a valid item. Build a minimal test book payload.
+  var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
   var isIafToken = userToken.substring(0, 5) === 'v^1.1';
+  var sellerProfiles = (shippingPolicyId && paymentPolicyId && returnPolicyId) ? (
+    '<SellerProfiles>'
+    + '<SellerShippingProfile><ShippingProfileID>' + shippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
+    + '<SellerReturnProfile><ReturnProfileID>' + returnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
+    + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
+    + '</SellerProfiles>'
+  ) : '';
   var xml = '<?xml version="1.0" encoding="utf-8"?>'
-    + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    + '<VerifyAddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
     + (isIafToken ? '' : '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>')
-    + '</GeteBayOfficialTimeRequest>';
+    + '<Item>'
+    + '<Title>Health Check Test Book - Do Not List</Title>'
+    + '<Description><![CDATA[This is an automated health check, not a real listing.]]></Description>'
+    + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
+    + '<StartPrice>9.99</StartPrice>'
+    + '<ConditionID>5000</ConditionID>'
+    + '<Country>US</Country><Location>United States</Location><Currency>USD</Currency>'
+    + '<DispatchTimeMax>3</DispatchTimeMax>'
+    + '<ListingDuration>GTC</ListingDuration>'
+    + '<ListingType>FixedPriceItem</ListingType>'
+    + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
+    + sellerProfiles
+    + '<ItemSpecifics>'
+    + '<NameValueList><Name>Book Title</Name><Value>Health Check Test</Value></NameValueList>'
+    + '<NameValueList><Name>Author</Name><Value>Test</Value></NameValueList>'
+    + '<NameValueList><Name>Language</Name><Value>English</Value></NameValueList>'
+    + '<NameValueList><Name>Format</Name><Value>Paperback</Value></NameValueList>'
+    + '</ItemSpecifics>'
+    + '</Item>'
+    + '</VerifyAddItemRequest>';
+
   var attempt = 0;
   var maxAttempts = 3;
   function tryOnce(){
@@ -376,7 +412,7 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
     var headers = {
       'X-EBAY-API-SITEID': '0',
       'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-      'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+      'X-EBAY-API-CALL-NAME': 'VerifyAddItem',
       'X-EBAY-API-DEV-NAME': devId,
       'X-EBAY-API-APP-NAME': clientId,
       'X-EBAY-API-CERT-NAME': clientSecret,
@@ -390,17 +426,15 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
       var data = '';
       r.on('data', function(c){ data += c; });
       r.on('end', function(){
-        // Success
-        if(/<Ack>Success<\/Ack>/.test(data) || /<Timestamp>/.test(data)){
+        // VerifyAddItem success: Ack=Success OR Ack=Warning (warnings are OK, means item validates but has minor issues)
+        if(/<Ack>Success<\/Ack>/.test(data) || /<Ack>Warning<\/Ack>/.test(data)){
           cb({ ok: true }); return;
         }
-        // Transient 503 from Akamai — retry
+        // Transient 503 — retry
         if(r.statusCode === 503 && attempt < maxAttempts){
-          console.log('eBay Trading API 503, retry ' + attempt + '/' + maxAttempts);
-          setTimeout(tryOnce, 1500 * attempt);
-          return;
+          setTimeout(tryOnce, 1500 * attempt); return;
         }
-        // Parse whatever error we got
+        // Parse errors
         var longMsg = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
         var shortMsg = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
         var errCode = data.match(/<ErrorCode>([^<]+)<\/ErrorCode>/);
@@ -413,14 +447,14 @@ function testEbayTradingApi(userToken, devId, clientId, clientSecret, cb){
         else if(r.statusCode === 503) errMsg = 'eBay CDN 503 after ' + attempt + ' attempts';
         else if(r.statusCode !== 200) errMsg = 'HTTP ' + r.statusCode;
         else errMsg = 'unrecognized response';
-        cb({ ok: false, error: 'Trading API: ' + errMsg.substring(0, 200) });
+        cb({ ok: false, error: 'VerifyAddItem: ' + errMsg.substring(0, 200) });
       });
     });
     tReq.on('error', function(e){
       if(attempt < maxAttempts){ setTimeout(tryOnce, 1500 * attempt); return; }
       cb({ ok: false, error: 'Trading API network: ' + e.message });
     });
-    tReq.setTimeout(12000, function(){
+    tReq.setTimeout(15000, function(){
       tReq.destroy();
       if(attempt < maxAttempts){ setTimeout(tryOnce, 1500 * attempt); return; }
       cb({ ok: false, error: 'Trading API timeout' });
@@ -503,7 +537,7 @@ function runHealthCheckForSubscriber(sub){
   }
 
   testEbayBrowseApi(clientId, clientSecret, function(res){ results.browseApi = res; done(); });
-  testEbayTradingApi(userToken, devId, clientId, clientSecret, function(res){ results.tradingApi = res; done(); });
+  testEbayTradingApi(sub, function(res){ results.tradingApi = res; done(); });
   testAmazonSpApi(function(res){ results.amazon = res; done(); });
 }
 
@@ -1898,15 +1932,45 @@ var server = http.createServer(function(req, res) {
         hasDevId: !!devId, devIdFirst: devId ? devId.substring(0,12) + '...' : null
       };
       var isIafToken2 = userToken && userToken.substring(0,5) === 'v^1.1';
-      info.tokenFormat = isIafToken2 ? 'OAuth IAF (using X-EBAY-API-IAF-TOKEN header)' : 'Auth\'n\'Auth (using XML element)';
+      info.tokenFormat = isIafToken2 ? 'OAuth IAF (X-EBAY-API-IAF-TOKEN header)' : 'Auth\'n\'Auth (XML element)';
+      info.hasShippingPolicy = !!sub.ebayShippingPolicyId;
+      info.hasPaymentPolicy = !!sub.ebayPaymentPolicyId;
+      info.hasReturnPolicy = !!sub.ebayReturnPolicyId;
+      var scheduleTime = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+      var sellerProfiles2 = (sub.ebayShippingPolicyId && sub.ebayPaymentPolicyId && sub.ebayReturnPolicyId) ? (
+        '<SellerProfiles>'
+        + '<SellerShippingProfile><ShippingProfileID>' + sub.ebayShippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
+        + '<SellerReturnProfile><ReturnProfileID>' + sub.ebayReturnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
+        + '<SellerPaymentProfile><PaymentProfileID>' + sub.ebayPaymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
+        + '</SellerProfiles>'
+      ) : '';
       var xml = '<?xml version="1.0" encoding="utf-8"?>'
-        + '<GeteBayOfficialTimeRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+        + '<VerifyAddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
         + (isIafToken2 ? '' : '<RequesterCredentials><eBayAuthToken>' + (userToken || '') + '</eBayAuthToken></RequesterCredentials>')
-        + '</GeteBayOfficialTimeRequest>';
+        + '<Item>'
+        + '<Title>Health Check Test Book - Do Not List</Title>'
+        + '<Description><![CDATA[Automated health check, not a real listing.]]></Description>'
+        + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
+        + '<StartPrice>9.99</StartPrice>'
+        + '<ConditionID>5000</ConditionID>'
+        + '<Country>US</Country><Location>United States</Location><Currency>USD</Currency>'
+        + '<DispatchTimeMax>3</DispatchTimeMax>'
+        + '<ListingDuration>GTC</ListingDuration>'
+        + '<ListingType>FixedPriceItem</ListingType>'
+        + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
+        + sellerProfiles2
+        + '<ItemSpecifics>'
+        + '<NameValueList><n>Book Title</n><Value>Health Check Test</Value></NameValueList>'
+        + '<NameValueList><n>Author</n><Value>Test</Value></NameValueList>'
+        + '<NameValueList><n>Language</n><Value>English</Value></NameValueList>'
+        + '<NameValueList><n>Format</n><Value>Paperback</Value></NameValueList>'
+        + '</ItemSpecifics>'
+        + '</Item>'
+        + '</VerifyAddItemRequest>';
       var dbgHeaders = {
         'X-EBAY-API-SITEID': '0',
         'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-        'X-EBAY-API-CALL-NAME': 'GeteBayOfficialTime',
+        'X-EBAY-API-CALL-NAME': 'VerifyAddItem',
         'X-EBAY-API-DEV-NAME': devId || '',
         'X-EBAY-API-APP-NAME': clientId || '',
         'X-EBAY-API-CERT-NAME': clientSecret || '',
