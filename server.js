@@ -2339,31 +2339,87 @@ var server = http.createServer(function(req, res) {
   // Hit: /debug-ebay-trading?code=BOOKSFORAGES1!
   // Debug: look up a SKU in warehouse_inventory
   // Hit: /debug-location?code=BOOKSFORAGES1!&sku=SHM.5STL
+  // Debug: fetch everything Amazon has for a given seller SKU
+  // Hit: /debug-amazon-listing?code=BOOKSFORAGES1!&sku=SHM.5STL
+  if (pathname === '/debug-amazon-listing' && req.method === 'GET') {
+    var alCode = (parsed.query.code || '').toUpperCase();
+    var alSku = parsed.query.sku || '';
+    if(!alSku){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing sku query param' })); return; }
+    getSubscriber(alCode, function(err, sub){
+      if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+      var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+      getAmazonAccessToken(function(tokenErr, accessToken){
+        if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr })); return; }
+        // Listings Items API — returns everything about this SKU
+        var path = '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(alSku)
+          + '?marketplaceIds=' + marketplaceId
+          + '&includedData=summaries,attributes,issues,offers,fulfillmentAvailability,procurement,relationships,productTypes';
+        var opts = {
+          hostname: 'sellingpartnerapi-na.amazon.com',
+          path: path,
+          method: 'GET',
+          headers: { 'x-amz-access-token': accessToken }
+        };
+        var aReq = https.request(opts, function(r){
+          var data = '';
+          r.on('data', function(c){ data += c; });
+          r.on('end', function(){
+            try {
+              var json = JSON.parse(data);
+              res.writeHead(200); res.end(JSON.stringify({
+                sku: alSku,
+                sellerId: sellerId,
+                httpStatus: r.statusCode,
+                response: json
+              }, null, 2));
+            } catch(e){
+              res.writeHead(200); res.end(JSON.stringify({
+                sku: alSku,
+                httpStatus: r.statusCode,
+                parseError: e.message,
+                raw: data.substring(0, 3000)
+              }, null, 2));
+            }
+          });
+        });
+        aReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Network: ' + e.message })); });
+        aReq.setTimeout(20000, function(){ aReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
+        aReq.end();
+      });
+    });
+    return;
+  }
+
   if (pathname === '/debug-location' && req.method === 'GET') {
     var dlCode = (parsed.query.code || '').toUpperCase();
     var dlSku = parsed.query.sku || '';
     connectMongo(function(err, database){
       if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
-      // Try both code casings + any matching SKU
-      database.collection('warehouse_inventory').find({ sku: dlSku }).toArray()
-        .then(function(rows){
-          res.writeHead(200); res.end(JSON.stringify({
-            skuQueried: dlSku,
-            codeQueried: dlCode,
-            matchesFound: (rows || []).length,
-            results: (rows || []).map(function(r){
-              return {
-                sku: r.sku,
-                code: r.code,
-                location: r.location,
-                status: r.status,
-                title: r.title ? r.title.substring(0, 60) : '',
-                createdAt: r.createdAt
-              };
+      // Query BOTH collections — warehouse_inventory (warehouse tool) and listings (eBay tool)
+      Promise.all([
+        database.collection('warehouse_inventory').find({ sku: dlSku }).toArray(),
+        database.collection('listings').find({ sku: dlSku }).toArray()
+      ]).then(function(results){
+        var warehouseRows = results[0] || [];
+        var listingsRows = results[1] || [];
+        res.writeHead(200); res.end(JSON.stringify({
+          skuQueried: dlSku,
+          codeQueried: dlCode,
+          warehouse_inventory: {
+            matchesFound: warehouseRows.length,
+            results: warehouseRows.map(function(r){
+              return { sku: r.sku, code: r.code, location: r.location, status: r.status, title: r.title ? r.title.substring(0,60) : '' };
             })
-          }, null, 2));
-        })
-        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          },
+          listings: {
+            matchesFound: listingsRows.length,
+            results: listingsRows.map(function(r){
+              return { sku: r.sku, subscriberCode: r.subscriberCode, location: r.location || null, allFields: Object.keys(r), title: r.title ? r.title.substring(0,60) : '' };
+            })
+          }
+        }, null, 2));
+      }).catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
     });
     return;
   }
