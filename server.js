@@ -3637,6 +3637,165 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── MESSAGES: List recent messages ──
+  if (pathname === '/my/messages' && req.method === 'GET') {
+    var mCode = (parsed.query.code || '').toUpperCase();
+    var session = getRequestSession(req, parsed);
+    if(!session || session.subscriberCode !== mCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Session required.' })); return;
+    }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ messages: [] })); return; }
+      database.collection('messages').find({ subscriberCode: mCode })
+        .sort({ createdAt: -1 }).limit(50).toArray()
+        .then(function(rows){
+          res.writeHead(200); res.end(JSON.stringify({
+            messages: (rows || []).map(function(m){
+              return {
+                id: m._id.toString(),
+                author: m.author,
+                authorRole: m.authorRole,
+                body: m.body,
+                createdAt: m.createdAt,
+                acknowledgements: m.acknowledgements || [],
+                replies: m.replies || []
+              };
+            })
+          }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ messages: [], error: e.message })); });
+    });
+    return;
+  }
+
+  // ── MESSAGES: Post a new message ──
+  if (pathname === '/my/messages' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var mCode = (data.code || '').toUpperCase();
+      var session = getRequestSession(req, parsed);
+      if(!session || session.subscriberCode !== mCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Session required.' })); return;
+      }
+      var body = (data.body || '').trim();
+      if(!body){ res.writeHead(400); res.end(JSON.stringify({ error: 'Message body required.' })); return; }
+      if(body.length > 2000){ res.writeHead(400); res.end(JSON.stringify({ error: 'Message too long (2000 char max).' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var msg = {
+          subscriberCode: mCode,
+          author: session.employeeName || 'Admin',
+          authorRole: session.role,
+          body: body,
+          createdAt: new Date(),
+          acknowledgements: [],
+          replies: []
+        };
+        database.collection('messages').insertOne(msg)
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, id: result.insertedId.toString() }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── MESSAGES: Acknowledge a message ──
+  // /my/messages/:id/ack
+  if (pathname.indexOf('/my/messages/') === 0 && pathname.endsWith('/ack') && req.method === 'POST') {
+    var ackId = pathname.replace('/my/messages/', '').replace('/ack', '');
+    parseBody(req, function(err, data){
+      var mCode = (data.code || '').toUpperCase();
+      var session = getRequestSession(req, parsed);
+      if(!session || session.subscriberCode !== mCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Session required.' })); return;
+      }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var ObjectId;
+        try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(500); res.end(JSON.stringify({ error: 'Server config error' })); return; }
+        var oid;
+        try { oid = new ObjectId(ackId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid message id' })); return; }
+        var ackEntry = {
+          name: session.employeeName || (session.role === 'admin' ? 'Admin' : 'User'),
+          at: new Date()
+        };
+        // Prevent duplicate acknowledgements by same user
+        database.collection('messages').updateOne(
+          { _id: oid, subscriberCode: mCode, 'acknowledgements.name': { $ne: ackEntry.name } },
+          { $push: { acknowledgements: ackEntry } }
+        )
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, newAck: result.modifiedCount > 0 }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── MESSAGES: Reply to a message ──
+  if (pathname.indexOf('/my/messages/') === 0 && pathname.endsWith('/reply') && req.method === 'POST') {
+    var replyId = pathname.replace('/my/messages/', '').replace('/reply', '');
+    parseBody(req, function(err, data){
+      var mCode = (data.code || '').toUpperCase();
+      var session = getRequestSession(req, parsed);
+      if(!session || session.subscriberCode !== mCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Session required.' })); return;
+      }
+      var replyBody = (data.body || '').trim();
+      if(!replyBody){ res.writeHead(400); res.end(JSON.stringify({ error: 'Reply body required.' })); return; }
+      if(replyBody.length > 1000){ res.writeHead(400); res.end(JSON.stringify({ error: 'Reply too long.' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var ObjectId;
+        try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(500); res.end(JSON.stringify({ error: 'Server config error' })); return; }
+        var oid;
+        try { oid = new ObjectId(replyId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid message id' })); return; }
+        var reply = {
+          author: session.employeeName || (session.role === 'admin' ? 'Admin' : 'User'),
+          body: replyBody,
+          at: new Date()
+        };
+        database.collection('messages').updateOne(
+          { _id: oid, subscriberCode: mCode },
+          { $push: { replies: reply } }
+        )
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, posted: result.modifiedCount > 0 }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── MESSAGES: Delete a message (author or admin only) ──
+  if (pathname.indexOf('/my/messages/') === 0 && req.method === 'DELETE') {
+    var delId = pathname.replace('/my/messages/', '');
+    var session = getRequestSession(req, parsed);
+    if(!session){ res.writeHead(403); res.end(JSON.stringify({ error: 'Session required.' })); return; }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+      var ObjectId;
+      try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(500); res.end(JSON.stringify({ error: 'Server config error' })); return; }
+      var oid;
+      try { oid = new ObjectId(delId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid message id' })); return; }
+      database.collection('messages').findOne({ _id: oid, subscriberCode: session.subscriberCode })
+        .then(function(msg){
+          if(!msg){ res.writeHead(404); res.end(JSON.stringify({ error: 'Message not found' })); return; }
+          var authorName = session.employeeName || (session.role === 'admin' ? 'Admin' : 'User');
+          if(msg.author !== authorName && session.role !== 'admin'){
+            res.writeHead(403); res.end(JSON.stringify({ error: 'Only the author or an admin can delete.' })); return;
+          }
+          return database.collection('messages').deleteOne({ _id: oid })
+            .then(function(){ res.writeHead(200); res.end(JSON.stringify({ success: true })); });
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+    });
+    return;
+  }
+
   if (pathname === '/my/settings' && req.method === 'PUT') {
     parseBody(req, function(err, data) {
       var code = (data.code || '').replace(/[\r\n]/g,'').trim();
