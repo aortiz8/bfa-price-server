@@ -4309,7 +4309,7 @@ var server = http.createServer(function(req, res) {
       if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ totalItems: 0, recentActivity: [] })); return; }
       Promise.all([
         database.collection('warehouse_inventory').countDocuments({ code: code, status: 'active' }),
-        database.collection('warehouse_inventory').find({ code: code }).sort({ createdAt: -1 }).limit(6).toArray()
+        database.collection('warehouse_inventory').find({ code: code, source: { $ne: 'csv-import' } }).sort({ createdAt: -1 }).limit(6).toArray()
       ]).then(function(results){
         var total = results[0];
         var recent = results[1].map(function(item){
@@ -4579,7 +4579,8 @@ var server = http.createServer(function(req, res) {
           }).sort({ createdAt: -1 }).toArray(),
           database.collection('warehouse_inventory').find({
             code: code,
-            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate },
+            source: { $ne: 'csv-import' }  // Exclude bulk-imported records from daily listing counts
           }).sort({ createdAt: -1 }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
@@ -4633,7 +4634,8 @@ var server = http.createServer(function(req, res) {
           }),
           database.collection('warehouse_inventory').countDocuments({
             code: code,
-            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate },
+            source: { $ne: 'csv-import' }  // exclude bulk-imported records
           })
         ]).then(function(results){
           var ebayTool = results[0] || 0;
@@ -4676,7 +4678,8 @@ var server = http.createServer(function(req, res) {
           }).sort({ createdAt: -1 }).toArray(),
           database.collection('warehouse_inventory').find({
             code: code,
-            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate },
+            source: { $ne: 'csv-import' }  // Exclude bulk-imported records from weekly counts
           }).sort({ createdAt: -1 }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
