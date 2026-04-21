@@ -2075,11 +2075,31 @@ var server = http.createServer(function(req, res) {
   // Fetches item details (SKU, title) per order, caching in MongoDB to avoid re-fetching.
   if (pathname === '/my/amazon/picklist' && req.method === 'GET') {
     var aCode = (parsed.query.code || '').toUpperCase();
+
+    // Server-side cache — 15 min fresh, serves stale on quota errors
+    var CACHE_TTL = 15 * 60 * 1000;
+    if(!global._amzPicklistCache) global._amzPicklistCache = {};
+    var cached = global._amzPicklistCache[aCode];
+    var nowMs = Date.now();
+    if(cached && (nowMs - cached.ts) < CACHE_TTL){
+      res.writeHead(200); res.end(JSON.stringify(cached.data)); return;
+    }
+
     getSubscriber(aCode, function(err, sub){
       if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+
+      // Helper: serve stale cache if we have one, else pass-through error
+      function serveStaleOrError(errorMsg, fallback){
+        if(cached && cached.data){
+          var stale = Object.assign({}, cached.data, { stale: true, staleReason: errorMsg });
+          res.writeHead(200); res.end(JSON.stringify(stale)); return;
+        }
+        res.writeHead(200); res.end(JSON.stringify(fallback)); return;
+      }
+
       getAmazonAccessToken(function(tokenErr, accessToken){
-        if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, pending: [] })); return; }
+        if(tokenErr){ serveStaleOrError('Amazon auth: ' + tokenErr, { error: 'Amazon auth: ' + tokenErr, pending: [] }); return; }
         connectMongo(function(dbErr, database){
           // 30-day window for outstanding orders
           var thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -2108,7 +2128,8 @@ var server = http.createServer(function(req, res) {
                   try {
                     var json = JSON.parse(data);
                     if(json.errors && json.errors[0]){
-                      res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].message || json.errors[0].code, pending: [] })); return;
+                      var errMsg = json.errors[0].message || json.errors[0].code;
+                      serveStaleOrError(errMsg, { error: errMsg, pending: [] }); return;
                     }
                     var payload = json.payload || {};
                     var orders = (payload.Orders || []).filter(function(o){
@@ -2119,11 +2140,11 @@ var server = http.createServer(function(req, res) {
                     if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
                     // 2) For each order, get items (with MongoDB cache)
                     enrichAndRespond();
-                  } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', pending: [] })); }
+                  } catch(e){ serveStaleOrError('Parse error', { error: 'Parse error', pending: [] }); }
                 });
               });
-              aReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, pending: [] })); });
-              aReq.setTimeout(20000, function(){ aReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', pending: [] })); });
+              aReq.on('error', function(e){ serveStaleOrError(e.message, { error: e.message, pending: [] }); });
+              aReq.setTimeout(20000, function(){ aReq.destroy(); serveStaleOrError('Timeout', { error: 'Timeout', pending: [] }); });
               aReq.end();
             }
 
@@ -2203,13 +2224,19 @@ var server = http.createServer(function(req, res) {
                         var locMap = {};
                         (rows || []).forEach(function(r){ if(r.sku) locMap[r.sku] = r.location || null; });
                         pending.forEach(function(o){ o.location = locMap[o.sku] || null; });
-                        res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                        var responseBody = { pending: pending, canceled: [], actionNeeded: [] };
+                        global._amzPicklistCache[aCode] = { ts: Date.now(), data: responseBody };
+                        res.writeHead(200); res.end(JSON.stringify(responseBody));
                       })
                       .catch(function(){
-                        res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                        var responseBody = { pending: pending, canceled: [], actionNeeded: [] };
+                        global._amzPicklistCache[aCode] = { ts: Date.now(), data: responseBody };
+                        res.writeHead(200); res.end(JSON.stringify(responseBody));
                       });
                   } else {
-                    res.writeHead(200); res.end(JSON.stringify({ pending: pending, canceled: [], actionNeeded: [] }));
+                    var responseBody = { pending: pending, canceled: [], actionNeeded: [] };
+                    global._amzPicklistCache[aCode] = { ts: Date.now(), data: responseBody };
+                    res.writeHead(200); res.end(JSON.stringify(responseBody));
                   }
                 }
                 startNext();
@@ -2254,6 +2281,16 @@ var server = http.createServer(function(req, res) {
 
   if (pathname === '/my/ebay/picklist' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
+
+    // Server-side cache — 15 min fresh, serves stale on errors
+    var EBAY_PL_CACHE_TTL = 15 * 60 * 1000;
+    if(!global._ebayPicklistCache) global._ebayPicklistCache = {};
+    var ebayCached = global._ebayPicklistCache[code];
+    var ebayNowMs = Date.now();
+    if(ebayCached && (ebayNowMs - ebayCached.ts) < EBAY_PL_CACHE_TTL){
+      res.writeHead(200); res.end(JSON.stringify(ebayCached.data)); return;
+    }
+
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
@@ -2346,6 +2383,15 @@ var server = http.createServer(function(req, res) {
                     // frontend handles those with SKU-based sorting.
                     var allOrdersForLookup = simplePending.concat(simpleCanceled).concat(simpleActionNeeded);
                     var skusToLookup = allOrdersForLookup.map(function(o){ return o.sku; }).filter(Boolean);
+                    function sendEbayPlResponse(){
+                      var body = {
+                        pending: simplePending,
+                        canceled: simpleCanceled,
+                        actionNeeded: simpleActionNeeded
+                      };
+                      global._ebayPicklistCache[code] = { ts: Date.now(), data: body };
+                      res.writeHead(200); res.end(JSON.stringify(body));
+                    }
                     if(skusToLookup.length && database){
                       database.collection('warehouse_inventory')
                         .find({ code: code, sku: { $in: skusToLookup } })
@@ -2355,26 +2401,13 @@ var server = http.createServer(function(req, res) {
                           var locMap = {};
                           (rows || []).forEach(function(r){ if(r.sku) locMap[r.sku] = r.location || null; });
                           allOrdersForLookup.forEach(function(o){ o.location = locMap[o.sku] || null; });
-                          res.writeHead(200); res.end(JSON.stringify({
-                            pending: simplePending,
-                            canceled: simpleCanceled,
-                            actionNeeded: simpleActionNeeded
-                          }));
+                          sendEbayPlResponse();
                         })
                         .catch(function(){
-                          // If lookup fails, return orders without location
-                          res.writeHead(200); res.end(JSON.stringify({
-                            pending: simplePending,
-                            canceled: simpleCanceled,
-                            actionNeeded: simpleActionNeeded
-                          }));
+                          sendEbayPlResponse();
                         });
                     } else {
-                      res.writeHead(200); res.end(JSON.stringify({
-                        pending: simplePending,
-                        canceled: simpleCanceled,
-                        actionNeeded: simpleActionNeeded
-                      }));
+                      sendEbayPlResponse();
                     }
                   }
                 } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
