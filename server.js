@@ -1415,16 +1415,22 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
     r.on('end', function(){
       try {
         var json = JSON.parse(data);
-        if(json.errors && json.errors[0]){ cb(json.errors[0].message, []); return; }
-        var orders = ((json.payload && json.payload.Orders) || []).filter(function(o){
+        if(json.errors && json.errors[0]){
+          console.log('[SYNC][Amazon] API error:', json.errors[0].message);
+          cb(json.errors[0].message, []);
+          return;
+        }
+        var rawOrders = ((json.payload && json.payload.Orders) || []);
+        var orders = rawOrders.filter(function(o){
           return o.FulfillmentChannel === 'MFN';
         });
+        console.log('[SYNC][Amazon] since=' + sinceIso + ' raw=' + rawOrders.length + ' mfn=' + orders.length + ' fulfillmentChannels=' + JSON.stringify(rawOrders.map(function(o){ return o.FulfillmentChannel; })));
         cb(null, orders);
-      } catch(e){ cb('Parse error', []); }
+      } catch(e){ console.log('[SYNC][Amazon] Parse error:', e.message); cb('Parse error', []); }
     });
   });
-  aReq.on('error', function(e){ cb(e.message, []); });
-  aReq.setTimeout(20000, function(){ aReq.destroy(); cb('Timeout', []); });
+  aReq.on('error', function(e){ console.log('[SYNC][Amazon] Request error:', e.message); cb(e.message, []); });
+  aReq.setTimeout(20000, function(){ aReq.destroy(); console.log('[SYNC][Amazon] Timeout'); cb('Timeout', []); });
   aReq.end();
 }
 
@@ -1622,10 +1628,21 @@ async function runSyncCycle(subscriberCode){
     });
 
     // ── AMAZON SIDE ──
+    var amazonFetchErr = null;
     var amazonOrders = await new Promise(function(resolve){
       fetchRecentAmazonOrders(accessToken, marketplaceId, amazonSince, function(err, orders){
+        if(err) amazonFetchErr = err;
         resolve(err ? [] : orders);
       });
+    });
+
+    // DEBUG: log amazon fetch status to sync_log so we can see it in UI
+    logSyncAction(subscriberCode, {
+      sku: '_debug_',
+      soldPlatform: 'amazon',
+      action: 'debug-amazon-fetch',
+      reason: 'fetched ' + amazonOrders.length + ' MFN orders since ' + amazonSince + (amazonFetchErr ? ' — ERROR: ' + amazonFetchErr : ''),
+      success: !amazonFetchErr
     });
 
     // Track already-processed Amazon order IDs so we don't re-end eBay listings
