@@ -1416,7 +1416,6 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
       try {
         var json = JSON.parse(data);
         if(json.errors && json.errors[0]){
-          console.log('[SYNC][Amazon] API error:', json.errors[0].message);
           cb(json.errors[0].message, []);
           return;
         }
@@ -1425,14 +1424,104 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
           return o.FulfillmentChannel === 'MFN';
         });
         var channels = rawOrders.map(function(o){ return o.FulfillmentChannel || 'null'; });
-        console.log('[SYNC][Amazon] since=' + sinceIso + ' raw=' + rawOrders.length + ' mfn=' + orders.length + ' fulfillmentChannels=' + JSON.stringify(channels));
         cb(null, orders, { rawCount: rawOrders.length, channels: channels });
-      } catch(e){ console.log('[SYNC][Amazon] Parse error:', e.message); cb('Parse error', []); }
+      } catch(e){ cb('Parse error', []); }
     });
   });
-  aReq.on('error', function(e){ console.log('[SYNC][Amazon] Request error:', e.message); cb(e.message, []); });
-  aReq.setTimeout(20000, function(){ aReq.destroy(); console.log('[SYNC][Amazon] Timeout'); cb('Timeout', []); });
+  aReq.on('error', function(e){ cb(e.message, []); });
+  aReq.setTimeout(20000, function(){ aReq.destroy(); cb('Timeout', []); });
   aReq.end();
+}
+
+// ─────────────────────────────────────────────────────────────
+// SHARED AMAZON ORDERS CACHE
+// One source of truth for "recent Amazon orders for this subscriber."
+// Used by: sync cycle, pick list, sales today.
+// TTL: 15 min — aligned with pick list / sales cache.
+// ─────────────────────────────────────────────────────────────
+var SHARED_AMZ_ORDERS_TTL = 15 * 60 * 1000;
+var SHARED_AMZ_ORDERS_LOOKBACK_DAYS = 30;
+
+function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
+  if(!global._sharedAmzOrders) global._sharedAmzOrders = {};
+  var cacheEntry = global._sharedAmzOrders[subscriberCode];
+  var nowMs = Date.now();
+  if(cacheEntry && (nowMs - cacheEntry.ts) < SHARED_AMZ_ORDERS_TTL){
+    cb(null, cacheEntry.orders, { cached: true, ts: cacheEntry.ts });
+    return;
+  }
+  // Cache miss — fetch fresh
+  var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+  var sinceIso = new Date(Date.now() - SHARED_AMZ_ORDERS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  getAmazonAccessToken(function(tokenErr, accessToken){
+    if(tokenErr){
+      // Serve stale if we have any
+      if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'auth: ' + tokenErr }); return; }
+      cb(tokenErr, []);
+      return;
+    }
+    // Paginated fetch — NextToken support
+    var allOrders = [];
+    function fetchPage(nextToken){
+      var qp = 'MarketplaceIds=' + marketplaceId + '&CreatedAfter=' + encodeURIComponent(sinceIso);
+      if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
+      var opts = {
+        hostname: 'sellingpartnerapi-na.amazon.com',
+        path: '/orders/v0/orders?' + qp,
+        method: 'GET',
+        headers: { 'x-amz-access-token': accessToken }
+      };
+      var aReq = https.request(opts, function(r){
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          try {
+            var json = JSON.parse(data);
+            if(json.errors && json.errors[0]){
+              var errMsg = json.errors[0].message || json.errors[0].code;
+              // Serve stale on quota or any error
+              if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: errMsg }); return; }
+              cb(errMsg, []);
+              return;
+            }
+            var payload = json.payload || {};
+            var pageOrders = (payload.Orders || []);
+            allOrders = allOrders.concat(pageOrders);
+            if(payload.NextToken){ fetchPage(payload.NextToken); return; }
+            // Done. Save to cache.
+            global._sharedAmzOrders[subscriberCode] = { ts: Date.now(), orders: allOrders };
+            cb(null, allOrders, { cached: false, fresh: true });
+          } catch(e){
+            if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'parse' }); return; }
+            cb('Parse error', []);
+          }
+        });
+      });
+      aReq.on('error', function(e){
+        if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: e.message }); return; }
+        cb(e.message, []);
+      });
+      aReq.setTimeout(20000, function(){
+        aReq.destroy();
+        if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'timeout' }); return; }
+        cb('Timeout', []);
+      });
+      aReq.end();
+    }
+    fetchPage(null);
+  });
+}
+
+// Get orders from shared cache filtered by CreatedAfter timestamp
+function getAmazonOrdersSince(subscriberCode, sub, sinceIso, cb){
+  getRecentAmazonOrdersShared(subscriberCode, sub, function(err, orders, info){
+    if(err){ cb(err, [], info); return; }
+    var filtered = (orders || []).filter(function(o){
+      return o.PurchaseDate && o.PurchaseDate >= sinceIso;
+    });
+    cb(null, filtered, info);
+  });
 }
 
 // Fetch items in an Amazon order (returns [{sku, quantity}])
@@ -1623,33 +1712,40 @@ async function runSyncCycle(subscriberCode){
     var amazonSince = new Date(Math.min(Date.now() - 60*1000, lastAmazon.getTime())).toISOString();
     var ebaySince = new Date(lastEbay.getTime()).toISOString();
 
-    // Get Amazon token
-    var accessToken = await new Promise(function(resolve, reject){
-      getAmazonAccessToken(function(err, tok){ if(err) reject(err); else resolve(tok); });
-    });
-
-    // ── AMAZON SIDE ──
+    // ── AMAZON SIDE — uses shared cache ──
     var amazonFetchErr = null;
-    var amazonFetchInfo = null;
-    var amazonOrders = await new Promise(function(resolve){
-      fetchRecentAmazonOrders(accessToken, marketplaceId, amazonSince, function(err, orders, info){
+    var amazonAllOrders = await new Promise(function(resolve){
+      getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders, info){
         if(err) amazonFetchErr = err;
-        amazonFetchInfo = info || null;
-        resolve(err ? [] : orders);
+        if(info && info.stale && info.error) amazonFetchErr = info.error;
+        resolve(err ? [] : (orders || []));
       });
     });
+    // Filter to MFN only (sync only processes orders Amazon doesn't ship for us)
+    var amazonOrders = amazonAllOrders.filter(function(o){ return o.FulfillmentChannel === 'MFN'; });
 
-    // DEBUG: log amazon fetch status to sync_log so we can see it in UI
-    var dbgReason = 'since ' + amazonSince + ' · raw=' + (amazonFetchInfo ? amazonFetchInfo.rawCount : '?') + ' · mfn=' + amazonOrders.length;
-    if(amazonFetchInfo && amazonFetchInfo.channels) dbgReason += ' · channels=' + amazonFetchInfo.channels.join(',');
-    if(amazonFetchErr) dbgReason += ' — ERROR: ' + amazonFetchErr;
-    logSyncAction(subscriberCode, {
-      sku: '_debug_',
-      soldPlatform: 'amazon',
-      action: 'debug-amazon-fetch',
-      reason: dbgReason,
-      success: !amazonFetchErr
-    });
+    // Only log on real errors — not every heartbeat
+    if(amazonFetchErr){
+      logSyncAction(subscriberCode, {
+        sku: '_error_',
+        soldPlatform: 'amazon',
+        action: 'amazon-fetch-error',
+        reason: amazonFetchErr,
+        success: false
+      });
+    }
+
+    // Get Amazon access token for orderItems calls (only if we have orders to enrich)
+    var accessToken = null;
+    if(amazonOrders.length > 0){
+      try {
+        accessToken = await new Promise(function(resolve, reject){
+          getAmazonAccessToken(function(err, tok){ if(err) reject(err); else resolve(tok); });
+        });
+      } catch(e){
+        accessToken = null;
+      }
+    }
 
     // Track already-processed Amazon order IDs so we don't re-end eBay listings
     var processedAmazon = await database.collection('sync_log').find({
@@ -1663,6 +1759,8 @@ async function runSyncCycle(subscriberCode){
     for(var i = 0; i < amazonOrders.length; i++){
       var order = amazonOrders[i];
       if(processedAmazonSet[order.AmazonOrderId]) continue;
+
+      if(!accessToken) continue; // Can't fetch items without token
 
       var items = await new Promise(function(resolve){
         fetchAmazonOrderItems(accessToken, order.AmazonOrderId, function(err, its){ resolve(err ? [] : its); });
@@ -2101,63 +2199,35 @@ var server = http.createServer(function(req, res) {
       getAmazonAccessToken(function(tokenErr, accessToken){
         if(tokenErr){ serveStaleOrError('Amazon auth: ' + tokenErr, { error: 'Amazon auth: ' + tokenErr, pending: [] }); return; }
         connectMongo(function(dbErr, database){
-          // 30-day window for outstanding orders
-          var thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
           var snoozedPromise = database
             ? database.collection('snoozed_orders').find({ subscriberCode: aCode }).toArray()
             : Promise.resolve([]);
           snoozedPromise.then(function(snoozed){
             var snoozedIds = (snoozed || []).map(function(s){ return s.orderId; });
-            // 1) Fetch Amazon orders
-            var allOrders = [];
-            function fetchOrders(nextToken){
-              var qp = 'MarketplaceIds=' + marketplaceId
-                     + '&CreatedAfter=' + encodeURIComponent(thirtyDaysAgo)
-                     + '&OrderStatuses=Unshipped,PartiallyShipped';
-              if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
-              var opts = {
-                hostname: 'sellingpartnerapi-na.amazon.com',
-                path: '/orders/v0/orders?' + qp,
-                method: 'GET',
-                headers: { 'x-amz-access-token': accessToken }
-              };
-              var aReq = https.request(opts, function(r){
-                var data = '';
-                r.on('data', function(c){ data += c; });
-                r.on('end', function(){
-                  try {
-                    var json = JSON.parse(data);
-                    if(json.errors && json.errors[0]){
-                      var errMsg = json.errors[0].message || json.errors[0].code;
-                      console.log('[PICKLIST][Amazon] API error for ' + aCode + ': ' + errMsg);
-                      serveStaleOrError(errMsg, { error: errMsg, pending: [] }); return;
-                    }
-                    var payload = json.payload || {};
-                    var rawCount = (payload.Orders || []).length;
-                    var orders = (payload.Orders || []).filter(function(o){
-                      // MFN only — skip Amazon-Fulfilled (FBA) since Amazon ships those
-                      return o.FulfillmentChannel === 'MFN' && snoozedIds.indexOf(o.AmazonOrderId) === -1;
-                    });
-                    console.log('[PICKLIST][Amazon] ' + aCode + ' raw=' + rawCount + ' mfn-after-snooze=' + orders.length + ' snoozedIds=' + snoozedIds.length);
-                    allOrders = allOrders.concat(orders);
-                    if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
-                    // 2) For each order, get items (with MongoDB cache)
-                    enrichAndRespond();
-                  } catch(e){ console.log('[PICKLIST][Amazon] Parse error:', e.message); serveStaleOrError('Parse error', { error: 'Parse error', pending: [] }); }
-                });
-              });
-              aReq.on('error', function(e){ serveStaleOrError(e.message, { error: e.message, pending: [] }); });
-              aReq.setTimeout(20000, function(){ aReq.destroy(); serveStaleOrError('Timeout', { error: 'Timeout', pending: [] }); });
-              aReq.end();
-            }
 
-            function enrichAndRespond(){
+            // Use SHARED Amazon orders cache (one API call serves sync + picklist + sales)
+            getRecentAmazonOrdersShared(aCode, sub, function(sharedErr, sharedOrders, info){
+              if(sharedErr && (!sharedOrders || !sharedOrders.length)){
+                serveStaleOrError(sharedErr, { error: sharedErr, pending: [] });
+                return;
+              }
+              // Filter: MFN only, Unshipped/PartiallyShipped, not snoozed
+              var allOrders = (sharedOrders || []).filter(function(o){
+                if(o.FulfillmentChannel !== 'MFN') return false;
+                if(snoozedIds.indexOf(o.AmazonOrderId) !== -1) return false;
+                var s = (o.OrderStatus || '');
+                return s === 'Unshipped' || s === 'PartiallyShipped';
+              });
+
               if(!allOrders.length){
                 var emptyBody = { pending: [], canceled: [], actionNeeded: [] };
                 global._amzPicklistCache[aCode] = { ts: Date.now(), data: emptyBody };
-                console.log('[PICKLIST][Amazon] ' + aCode + ' — returning empty (0 orders)');
                 res.writeHead(200); res.end(JSON.stringify(emptyBody)); return;
               }
+              enrichAndRespond(allOrders, accessToken, database);
+            });
+
+            function enrichAndRespond(allOrders, accessToken, database){
               // Look up cached items for these orders in MongoDB
               var orderIds = allOrders.map(function(o){ return o.AmazonOrderId; });
               var cachedById = {};
@@ -2277,7 +2347,8 @@ var server = http.createServer(function(req, res) {
               iReq.end();
             }
 
-            fetchOrders(null);
+            fetchOrderItems; // function defined above
+
           }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ error: 'Snoozed lookup failed', pending: [] })); });
         });
       });
@@ -2516,6 +2587,102 @@ var server = http.createServer(function(req, res) {
         endDate = null;
       }
 
+      // ── SHARED CACHE SHORT-CIRCUIT ──
+      // If the requested window falls within the 30-day shared cache, serve from there.
+      // This avoids hitting Amazon's quota with duplicate queries.
+      var sharedCacheWindow = Date.now() - (SHARED_AMZ_ORDERS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+      var canUseShared = startDate.getTime() >= sharedCacheWindow;
+
+      if(canUseShared){
+        getRecentAmazonOrdersShared(code, sub, function(sharedErr, sharedOrders, info){
+          if(sharedErr && (!sharedOrders || !sharedOrders.length)){
+            // No cache, no orders — fall back to direct fetch path below
+            directFetchPath();
+            return;
+          }
+          // Filter to requested window
+          var startIso = startDate.toISOString();
+          var endIso = endDate ? endDate.toISOString() : null;
+          var inWindow = (sharedOrders || []).filter(function(o){
+            if(!o.PurchaseDate) return false;
+            if(o.PurchaseDate < startIso) return false;
+            if(endIso && o.PurchaseDate >= endIso) return false;
+            // Only count non-canceled, non-pending orders with a total
+            if(o.OrderStatus === 'Canceled' || o.OrderStatus === 'Pending') return false;
+            if(!o.OrderTotal) return false;
+            return true;
+          });
+          var totalRevenue = inWindow.reduce(function(sum, o){
+            var amt = o.OrderTotal && parseFloat(o.OrderTotal.Amount);
+            return sum + (isNaN(amt) ? 0 : amt);
+          }, 0);
+          var simplified = inWindow.map(function(o){
+            return {
+              orderId: o.AmazonOrderId,
+              date: o.PurchaseDate,
+              title: '',
+              sku: '',
+              price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
+              paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
+              status: o.OrderStatus,
+              buyer: ''
+            };
+          });
+          // Enrich with titles for date-specific or today queries (small result sets)
+          function respondSharedResult(){
+            var result = {
+              count: inWindow.length,
+              totalRevenue: Math.round(totalRevenue * 100) / 100,
+              orders: simplified
+            };
+            if(info && info.stale) result.stale = true;
+            global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
+            res.writeHead(200); res.end(JSON.stringify(result));
+          }
+          if((specificDate || period === 'today') && simplified.length && simplified.length <= 30){
+            getAmazonAccessToken(function(tokenErr, accessToken){
+              if(tokenErr || !accessToken){ respondSharedResult(); return; }
+              var idx = 0;
+              function enrichNext(){
+                if(idx >= simplified.length){ respondSharedResult(); return; }
+                var o = simplified[idx];
+                var iOpts = {
+                  hostname: 'sellingpartnerapi-na.amazon.com',
+                  path: '/orders/v0/orders/' + encodeURIComponent(o.orderId) + '/orderItems',
+                  method: 'GET',
+                  headers: { 'x-amz-access-token': accessToken }
+                };
+                var iReq = https.request(iOpts, function(r2){
+                  var d2 = '';
+                  r2.on('data', function(c){ d2 += c; });
+                  r2.on('end', function(){
+                    try {
+                      var j2 = JSON.parse(d2);
+                      var items = ((j2.payload || {}).OrderItems) || [];
+                      if(items[0]){
+                        o.title = items[0].Title || '';
+                        o.sku = items[0].SellerSKU || '';
+                      }
+                    } catch(e){}
+                    idx++;
+                    setTimeout(enrichNext, 250);
+                  });
+                });
+                iReq.on('error', function(){ idx++; setTimeout(enrichNext, 250); });
+                iReq.setTimeout(8000, function(){ iReq.destroy(); idx++; setTimeout(enrichNext, 250); });
+                iReq.end();
+              }
+              enrichNext();
+            });
+          } else {
+            respondSharedResult();
+          }
+        });
+        return;
+      }
+
+      // ── DIRECT FETCH PATH (for historical date ranges beyond 30 days) ──
+      function directFetchPath(){
       getAmazonAccessToken(function(tokenErr, accessToken){
         if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, orders: [] })); return; }
         // SP-API Orders: /orders/v0/orders
@@ -2662,6 +2829,8 @@ var server = http.createServer(function(req, res) {
         }
         fetchOrders(null, 1);
       });
+      } // end directFetchPath
+      directFetchPath();
     });
     return;
   }
