@@ -914,6 +914,7 @@ var server = http.createServer(function(req, res) {
           response.businessZip = sub.businessZip || '';
           response.businessPhone = sub.businessPhone || '';
           response.vendors = sub.vendors || [];
+          response.customers = sub.customers || [];
         }
 
         res.writeHead(200); res.end(JSON.stringify(response));
@@ -4045,7 +4046,7 @@ var server = http.createServer(function(req, res) {
         }
 
         // Only allow updating safe fields
-        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId, businessAddressLine1: data.businessAddressLine1, businessAddressLine2: data.businessAddressLine2, businessCity: data.businessCity, businessState: data.businessState, businessZip: data.businessZip, businessPhone: data.businessPhone, vendors: data.vendors };
+        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId, businessAddressLine1: data.businessAddressLine1, businessAddressLine2: data.businessAddressLine2, businessCity: data.businessCity, businessState: data.businessState, businessZip: data.businessZip, businessPhone: data.businessPhone, vendors: data.vendors, customers: data.customers };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
           if (err || !database) {
