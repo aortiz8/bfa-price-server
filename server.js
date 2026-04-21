@@ -4327,6 +4327,142 @@ var server = http.createServer(function(req, res) {
   }
 
   // GET /my/repricer/settings?code=X — admin fetches their config
+  // ───────────────────────────────────────────────────────────
+  // IMPORT: Upload CSV of existing listings into warehouse_inventory
+  // ───────────────────────────────────────────────────────────
+  // Expected CSV columns (order of first 9 matters, rest ignored):
+  // ASIN, ISBN, Cond, SKU, UnitID#, SKUID#, Loc Name, Loc Seq#, Price, [Binding], [Title]
+  // - Loc Name format: "row-section" like "1-A". Row 0 = skipped.
+  // - Upserts by SKU. Existing SKUs updated, new SKUs inserted.
+
+  // POST /my/import/csv  body: { code, csvText }
+  if (pathname === '/my/import/csv' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var iCode = (data.code || '').toUpperCase();
+      var iSess = getRequestSession(req, parsed);
+      if(!iSess || iSess.role !== 'admin' || iSess.subscriberCode !== iCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var csvText = data.csvText || '';
+      if(!csvText || csvText.length < 10){
+        res.writeHead(400); res.end(JSON.stringify({ error: 'CSV content is empty or too small.' })); return;
+      }
+
+      // Parse CSV — handle quoted fields containing commas
+      function parseCsvLine(line){
+        var out = [];
+        var cur = '';
+        var inQuote = false;
+        for(var i=0; i<line.length; i++){
+          var c = line.charCodeAt(i);
+          var ch = line[i];
+          if(inQuote){
+            if(ch === '"' && line[i+1] === '"'){ cur += '"'; i++; }
+            else if(ch === '"'){ inQuote = false; }
+            else { cur += ch; }
+          } else {
+            if(ch === '"'){ inQuote = true; }
+            else if(ch === ','){ out.push(cur); cur = ''; }
+            else { cur += ch; }
+          }
+        }
+        out.push(cur);
+        return out;
+      }
+
+      var lines = csvText.split(/\r?\n/).filter(function(l){ return l.trim().length > 0; });
+      if(lines.length < 2){
+        res.writeHead(400); res.end(JSON.stringify({ error: 'CSV needs a header row + at least 1 data row.' })); return;
+      }
+
+      // Skip header; first data row starts at index 1
+      var records = [];
+      var skippedRow0 = 0;
+      var skippedMx = 0;
+      var malformed = 0;
+      for(var i=1; i<lines.length; i++){
+        var cols = parseCsvLine(lines[i]);
+        if(cols.length < 9){ malformed++; continue; }
+        var asin = (cols[0]||'').trim();
+        var isbn = (cols[1]||'').trim();
+        var cond = (cols[2]||'').trim();
+        var sku  = (cols[3]||'').trim();
+        var locName = (cols[6]||'').trim();
+        var locSeq = parseInt(cols[7]) || 0;
+        var price = parseFloat(cols[8]) || 0;
+        var binding = (cols[9]||'').trim();
+        var title = (cols[10]||'').trim();
+        if(!sku){ malformed++; continue; }
+        // Skip MX-prefixed locations (Mexican inventory, handle later)
+        if(/^MX-/i.test(locName)){ skippedMx++; continue; }
+        // Parse Loc Name "1-A" → row=1, section=A
+        var locParts = locName.split('-');
+        if(locParts.length !== 2){ malformed++; continue; }
+        var row = parseInt(locParts[0]);
+        var section = (locParts[1]||'').trim().toUpperCase();
+        if(row === 0){ skippedRow0++; continue; } // User said row 0 is invalid
+        if(isNaN(row) || !section){ malformed++; continue; }
+
+        records.push({
+          sku: sku,
+          asin: asin,
+          isbn: isbn,
+          condition: cond,
+          price: price,
+          title: title,
+          binding: binding,
+          location: { row: row, section: section, sequence: locSeq }
+        });
+      }
+
+      if(!records.length){
+        res.writeHead(400); res.end(JSON.stringify({ error: 'No valid rows found.', skippedRow0: skippedRow0, skippedMx: skippedMx, malformed: malformed })); return;
+      }
+
+      // Bulk upsert into MongoDB
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var bulk = database.collection('warehouse_inventory').initializeUnorderedBulkOp();
+        var now = new Date();
+        records.forEach(function(r){
+          bulk.find({ code: iCode, sku: r.sku }).upsert().updateOne({
+            $set: {
+              code: iCode,
+              sku: r.sku,
+              asin: r.asin,
+              isbn: r.isbn,
+              condition: r.condition,
+              price: r.price,
+              title: r.title,
+              binding: r.binding,
+              location: r.location,
+              source: 'csv-import',
+              status: 'active',
+              importedAt: now
+            },
+            $setOnInsert: { createdAt: now }
+          });
+        });
+        bulk.execute()
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({
+              success: true,
+              inserted: result.nUpserted || 0,
+              updated: result.nModified || 0,
+              total: records.length,
+              skippedRow0: skippedRow0,
+              skippedMx: skippedMx,
+              malformed: malformed
+            }));
+          })
+          .catch(function(e){
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Import failed: ' + e.message }));
+          });
+      });
+    });
+    return;
+  }
+
   if (pathname === '/my/repricer/settings' && req.method === 'GET') {
     var rCode = (parsed.query.code || '').toUpperCase();
     var rSess = getRequestSession(req, parsed);
