@@ -2457,15 +2457,17 @@ var server = http.createServer(function(req, res) {
     var specificDate = parsed.query.date || null;
 
     // Cache tier by period — balance freshness vs SP-API quota
+    // Unified 15-min cache for all periods — protects Amazon SP-API quota.
+    // Covers: today, week, month, lastmonth-to-date, specificDate.
     var CACHE_TTL_MS = {
-      'today': 30 * 1000,            // 30s
-      'week':  2 * 60 * 1000,        // 2min
-      'month': 12 * 60 * 1000,       // 12min — matches portal auto-refresh interval
+      'today': 15 * 60 * 1000,       // 15min
+      'week':  15 * 60 * 1000,       // 15min
+      'month': 15 * 60 * 1000,       // 15min
       'lastmonth-to-date': 30 * 60 * 1000, // 30min (historical, doesn't change)
       'date':  60 * 60 * 1000        // 1hr (historical specific date)
     };
     var cacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
-    var ttl = specificDate ? CACHE_TTL_MS.date : (CACHE_TTL_MS[period] || 30000);
+    var ttl = specificDate ? CACHE_TTL_MS.date : (CACHE_TTL_MS[period] || 15 * 60 * 1000);
 
     if(!global._amzSalesCache) global._amzSalesCache = {};
     var cached = global._amzSalesCache[cacheKey];
@@ -2664,6 +2666,34 @@ var server = http.createServer(function(req, res) {
     var period = parsed.query.period || 'today'; // today, week, month, date
     var offsetMinutes = parseInt(parsed.query.offset || '0');
     var specificDate = parsed.query.date || null; // YYYY-MM-DD for specific date
+
+    // Unified 15-min server cache (matches Amazon sales cache)
+    var EBAY_CACHE_TTL_MS = {
+      'today': 15 * 60 * 1000,
+      'week':  15 * 60 * 1000,
+      'month': 15 * 60 * 1000,
+      'lastmonth-to-date': 30 * 60 * 1000,
+      'date':  60 * 60 * 1000
+    };
+    var ebayCacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
+    var ebayTtl = specificDate ? EBAY_CACHE_TTL_MS.date : (EBAY_CACHE_TTL_MS[period] || 15 * 60 * 1000);
+    if(!global._ebaySalesCache) global._ebaySalesCache = {};
+    var ebayCached = global._ebaySalesCache[ebayCacheKey];
+    var ebayNowMs = Date.now();
+    if(ebayCached && (ebayNowMs - ebayCached.ts) < ebayTtl){
+      res.writeHead(200); res.end(JSON.stringify(ebayCached.data)); return;
+    }
+    function serveEbayStaleOrFresh(body, isError){
+      if(isError && ebayCached && ebayCached.data){
+        var stale = Object.assign({}, ebayCached.data, { stale: true });
+        res.writeHead(200); res.end(JSON.stringify(stale)); return;
+      }
+      if(!isError){
+        global._ebaySalesCache[ebayCacheKey] = { ts: Date.now(), data: body };
+      }
+      res.writeHead(200); res.end(JSON.stringify(body));
+    }
+
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var userToken = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
@@ -2739,7 +2769,7 @@ var server = http.createServer(function(req, res) {
             }
             try {
               var json = JSON.parse(data);
-              if (json.errors) { res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].longMessage, orders: [] })); return; }
+              if (json.errors) { serveEbayStaleOrFresh({ error: json.errors[0].longMessage, orders: [] }, true); return; }
               var orders = (json.orders || []).filter(function(o){
                 return o.orderPaymentStatus === 'PAID' && o.cancelStatus.cancelState === 'NONE_REQUESTED';
               });
@@ -2768,12 +2798,23 @@ var server = http.createServer(function(req, res) {
                   totalRevenue: Math.round(totalRevenue * 100) / 100,
                   orders: simplifiedOrders
                 }));
+                // Save to cache
+                try {
+                  global._ebaySalesCache[ebayCacheKey] = {
+                    ts: Date.now(),
+                    data: {
+                      count: allOrders.length,
+                      totalRevenue: Math.round(totalRevenue * 100) / 100,
+                      orders: simplifiedOrders
+                    }
+                  };
+                } catch(e){}
               }
-            } catch(e) { res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
+            } catch(e) { serveEbayStaleOrFresh({ error: 'Parse error', orders: [] }, true); }
           });
         });
-        req2.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
-        req2.setTimeout(15000, function(){ req2.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
+        req2.on('error', function(e){ serveEbayStaleOrFresh({ error: e.message, orders: [] }, true); });
+        req2.setTimeout(15000, function(){ req2.destroy(); serveEbayStaleOrFresh({ error: 'Timeout', orders: [] }, true); });
         req2.end();
       }
       fetchOrders(0);
