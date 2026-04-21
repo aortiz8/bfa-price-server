@@ -1400,11 +1400,31 @@ var server = http.createServer(function(req, res) {
 
   // ── Amazon Sales API ──
   // Uses SP-API Orders endpoint. Mirrors /my/ebay/sales logic for consistency.
+  // Has in-memory caching per subscriber+period to survive SP-API rate limits.
   if (pathname === '/my/amazon/sales' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var period = parsed.query.period || 'today';
     var offsetMinutes = parseInt(parsed.query.offset || '0');
     var specificDate = parsed.query.date || null;
+
+    // Cache tier by period — balance freshness vs SP-API quota
+    var CACHE_TTL_MS = {
+      'today': 30 * 1000,            // 30s
+      'week':  2 * 60 * 1000,        // 2min
+      'month': 12 * 60 * 1000,       // 12min — matches portal auto-refresh interval
+      'lastmonth-to-date': 30 * 60 * 1000, // 30min (historical, doesn't change)
+      'date':  60 * 60 * 1000        // 1hr (historical specific date)
+    };
+    var cacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
+    var ttl = specificDate ? CACHE_TTL_MS.date : (CACHE_TTL_MS[period] || 30000);
+
+    if(!global._amzSalesCache) global._amzSalesCache = {};
+    var cached = global._amzSalesCache[cacheKey];
+    var nowMs = Date.now();
+    if(cached && (nowMs - cached.ts) < ttl){
+      // Fresh cache hit
+      res.writeHead(200); res.end(JSON.stringify(cached.data)); return;
+    }
     getSubscriber(code, function(err, sub) {
       if (!sub) { res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
       var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
@@ -1443,7 +1463,23 @@ var server = http.createServer(function(req, res) {
         if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, orders: [] })); return; }
         // SP-API Orders: /orders/v0/orders
         var allOrders = [];
-        function fetchOrders(nextToken){
+        var responded = false;
+        function sendResponse(body){
+          if(responded) return;
+          responded = true;
+          res.writeHead(200); res.end(JSON.stringify(body));
+        }
+        function serveStaleOrError(errorMsg){
+          // If we have ANY cached data for this key (even expired), serve it and mark as stale.
+          if(cached && cached.data){
+            var stale = Object.assign({}, cached.data, { stale: true, staleReason: errorMsg });
+            sendResponse(stale);
+            return true;
+          }
+          return false;
+        }
+        function fetchOrders(nextToken, retriesLeft){
+          if(typeof retriesLeft !== 'number') retriesLeft = 1;
           var qp = 'MarketplaceIds=' + marketplaceId
                  + '&CreatedAfter=' + encodeURIComponent(startDate.toISOString());
           if(endDate) qp += '&CreatedBefore=' + encodeURIComponent(endDate.toISOString());
@@ -1461,15 +1497,24 @@ var server = http.createServer(function(req, res) {
               try {
                 var json = JSON.parse(data);
                 if(json.errors && json.errors[0]){
-                  res.writeHead(200); res.end(JSON.stringify({ error: json.errors[0].message || json.errors[0].code, orders: [] })); return;
+                  var errMsg = json.errors[0].message || json.errors[0].code || 'Unknown error';
+                  var isQuota = /quota|throttl|rate/i.test(errMsg);
+                  // Retry once with 3s delay for quota errors
+                  if(isQuota && retriesLeft > 0){
+                    setTimeout(function(){ fetchOrders(nextToken, retriesLeft - 1); }, 3000);
+                    return;
+                  }
+                  // Still failing — try to serve stale cache, else pass the error
+                  if(serveStaleOrError(errMsg)) return;
+                  sendResponse({ error: errMsg, orders: [] });
+                  return;
                 }
                 var payload = json.payload || {};
                 var orders = (payload.Orders || []).filter(function(o){
-                  // Treat valid sales as: not Canceled, not Pending, has a total
                   return o.OrderStatus !== 'Canceled' && o.OrderStatus !== 'Pending' && o.OrderTotal;
                 });
                 allOrders = allOrders.concat(orders);
-                if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
+                if(payload.NextToken){ fetchOrders(payload.NextToken, 1); return; }
                 // Done — compute totals
                 var totalRevenue = allOrders.reduce(function(sum, o){
                   var amt = o.OrderTotal && parseFloat(o.OrderTotal.Amount);
@@ -1479,26 +1524,39 @@ var server = http.createServer(function(req, res) {
                   return {
                     orderId: o.AmazonOrderId,
                     date: o.PurchaseDate,
-                    title: '',  // SP-API Orders list doesn't include item titles — would need separate call per order
+                    title: '',
                     price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
-                    paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0, // Amazon fees aren't in this response
+                    paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
                     status: o.OrderStatus,
                     buyer: ''
                   };
                 });
-                res.writeHead(200); res.end(JSON.stringify({
+                var result = {
                   count: allOrders.length,
                   totalRevenue: Math.round(totalRevenue * 100) / 100,
                   orders: simplified
-                }));
-              } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error', orders: [] })); }
+                };
+                // Cache the successful result
+                global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
+                sendResponse(result);
+              } catch(e){
+                if(serveStaleOrError('Parse error')) return;
+                sendResponse({ error: 'Parse error', orders: [] });
+              }
             });
           });
-          aReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, orders: [] })); });
-          aReq.setTimeout(20000, function(){ aReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout', orders: [] })); });
+          aReq.on('error', function(e){
+            if(serveStaleOrError(e.message)) return;
+            sendResponse({ error: e.message, orders: [] });
+          });
+          aReq.setTimeout(20000, function(){
+            aReq.destroy();
+            if(serveStaleOrError('Timeout')) return;
+            sendResponse({ error: 'Timeout', orders: [] });
+          });
           aReq.end();
         }
-        fetchOrders(null);
+        fetchOrders(null, 1);
       });
     });
     return;
