@@ -3850,6 +3850,163 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── MESSAGES: List recent messages ──
+  // ───────────────────────────────────────────────────────────
+  // REPRICER ENDPOINTS
+  // ───────────────────────────────────────────────────────────
+
+  // Default repricer config used when subscriber has none saved
+  function getDefaultRepricerConfig(){
+    return {
+      enabled: false,
+      dryRun: true,
+      direction: 'both',              // 'down', 'up', 'both'
+      floorPrice: 5.99,
+      maxDropPct: 15,
+      maxIncreasePct: 20,
+      cycleIntervalDays: 1,
+      ebayDiscountPct: 15,
+      conditionMatch: 'smart',        // 'strict', 'smart', 'loose'
+      undercutStrategy: 'penny',      // 'penny', 'match', 'percent1', 'percent2', 'percent5', 'dollar50', 'dollar100', 'second-lowest-penny'
+      fulfillmentFilter: 'fbm-only',  // 'fbm-only', 'all', 'fbm-plus-fba-above-threshold'
+      excludedSkus: [],
+      lastRunStartedAt: null,
+      lastRunCompletedAt: null,
+      lastRunSummary: null
+    };
+  }
+
+  // GET /my/repricer/settings?code=X — admin fetches their config
+  if (pathname === '/my/repricer/settings' && req.method === 'GET') {
+    var rCode = (parsed.query.code || '').toUpperCase();
+    var rSess = getRequestSession(req, parsed);
+    if(!rSess || rSess.role !== 'admin' || rSess.subscriberCode !== rCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    getSubscriber(rCode, function(err, sub){
+      if(!sub){ res.writeHead(404); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+      var config = Object.assign({}, getDefaultRepricerConfig(), sub.repricer || {});
+      res.writeHead(200); res.end(JSON.stringify({ config: config }));
+    });
+    return;
+  }
+
+  // PUT /my/repricer/settings — admin saves their config
+  if (pathname === '/my/repricer/settings' && req.method === 'PUT') {
+    parseBody(req, function(err, data){
+      var rCode = (data.code || '').toUpperCase();
+      var rSess = getRequestSession(req, parsed);
+      if(!rSess || rSess.role !== 'admin' || rSess.subscriberCode !== rCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      // Whitelist only known fields, coerce types
+      var defaults = getDefaultRepricerConfig();
+      var update = {};
+      if(typeof data.enabled === 'boolean') update['repricer.enabled'] = data.enabled;
+      if(typeof data.dryRun === 'boolean') update['repricer.dryRun'] = data.dryRun;
+      if(['down','up','both'].indexOf(data.direction) !== -1) update['repricer.direction'] = data.direction;
+      if(typeof data.floorPrice === 'number' && data.floorPrice >= 0) update['repricer.floorPrice'] = data.floorPrice;
+      if(typeof data.maxDropPct === 'number' && data.maxDropPct >= 0 && data.maxDropPct <= 100) update['repricer.maxDropPct'] = data.maxDropPct;
+      if(typeof data.maxIncreasePct === 'number' && data.maxIncreasePct >= 0 && data.maxIncreasePct <= 1000) update['repricer.maxIncreasePct'] = data.maxIncreasePct;
+      if(typeof data.cycleIntervalDays === 'number' && data.cycleIntervalDays > 0 && data.cycleIntervalDays <= 30) update['repricer.cycleIntervalDays'] = data.cycleIntervalDays;
+      if(typeof data.ebayDiscountPct === 'number' && data.ebayDiscountPct >= 0 && data.ebayDiscountPct <= 100) update['repricer.ebayDiscountPct'] = data.ebayDiscountPct;
+      if(['strict','smart','loose'].indexOf(data.conditionMatch) !== -1) update['repricer.conditionMatch'] = data.conditionMatch;
+      if(['penny','match','percent1','percent2','percent5','dollar50','dollar100','second-lowest-penny'].indexOf(data.undercutStrategy) !== -1) update['repricer.undercutStrategy'] = data.undercutStrategy;
+      if(['fbm-only','all','fbm-plus-fba-above-threshold'].indexOf(data.fulfillmentFilter) !== -1) update['repricer.fulfillmentFilter'] = data.fulfillmentFilter;
+      if(Array.isArray(data.excludedSkus)) update['repricer.excludedSkus'] = data.excludedSkus.map(function(s){ return (s||'').trim(); }).filter(Boolean);
+
+      if(!Object.keys(update).length){
+        res.writeHead(400); res.end(JSON.stringify({ error: 'No valid settings provided.' })); return;
+      }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('subscribers').updateOne(
+          { code: { $regex: new RegExp('^' + rCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+          { $set: update }
+        )
+          .then(function(r){
+            if(r.matchedCount === 0){ res.writeHead(404); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+            res.writeHead(200); res.end(JSON.stringify({ success: true }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // GET /my/repricer/history?code=X&limit=50 — last N price changes
+  if (pathname === '/my/repricer/history' && req.method === 'GET') {
+    var hCode = (parsed.query.code || '').toUpperCase();
+    var hSess = getRequestSession(req, parsed);
+    if(!hSess || hSess.role !== 'admin' || hSess.subscriberCode !== hCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var hLimit = Math.min(parseInt(parsed.query.limit || '50') || 50, 500);
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ history: [] })); return; }
+      database.collection('reprice_history').find({ subscriberCode: hCode })
+        .sort({ createdAt: -1 }).limit(hLimit).toArray()
+        .then(function(rows){
+          res.writeHead(200); res.end(JSON.stringify({
+            history: (rows || []).map(function(h){
+              return {
+                sku: h.sku,
+                platform: h.platform,
+                oldPrice: h.oldPrice,
+                newPrice: h.newPrice,
+                reason: h.reason,
+                dryRun: !!h.dryRun,
+                skipped: !!h.skipped,
+                createdAt: h.createdAt
+              };
+            })
+          }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ history: [], error: e.message })); });
+    });
+    return;
+  }
+
+  // POST /my/repricer/run — admin triggers a cycle manually
+  // For now this is a stub that returns success — the actual engine is built in Step 3.
+  if (pathname === '/my/repricer/run' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var rCode = (data.code || '').toUpperCase();
+      var rSess = getRequestSession(req, parsed);
+      if(!rSess || rSess.role !== 'admin' || rSess.subscriberCode !== rCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      // Kick off the repricer cycle in background (non-blocking)
+      if(typeof runRepricerCycle === 'function'){
+        try { runRepricerCycle(rCode); } catch(e){}
+        res.writeHead(200); res.end(JSON.stringify({ success: true, message: 'Cycle started. Check history for progress.' }));
+      } else {
+        res.writeHead(200); res.end(JSON.stringify({ success: false, message: 'Repricer engine not yet deployed. Settings can be saved, but runs are disabled.' }));
+      }
+    });
+    return;
+  }
+
+  // GET /my/repricer/status?code=X — check if a cycle is running
+  if (pathname === '/my/repricer/status' && req.method === 'GET') {
+    var sCode = (parsed.query.code || '').toUpperCase();
+    var sSess = getRequestSession(req, parsed);
+    if(!sSess || sSess.role !== 'admin' || sSess.subscriberCode !== sCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    getSubscriber(sCode, function(err, sub){
+      if(!sub){ res.writeHead(404); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+      var cfg = sub.repricer || {};
+      var running = !!(cfg.lastRunStartedAt && !cfg.lastRunCompletedAt);
+      res.writeHead(200); res.end(JSON.stringify({
+        running: running,
+        lastRunStartedAt: cfg.lastRunStartedAt || null,
+        lastRunCompletedAt: cfg.lastRunCompletedAt || null,
+        lastRunSummary: cfg.lastRunSummary || null
+      }));
+    });
+    return;
+  }
+
   if (pathname === '/my/messages' && req.method === 'GET') {
     var mCode = (parsed.query.code || '').toUpperCase();
     var session = getRequestSession(req, parsed);
