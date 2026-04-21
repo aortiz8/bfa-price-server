@@ -2129,18 +2129,21 @@ var server = http.createServer(function(req, res) {
                     var json = JSON.parse(data);
                     if(json.errors && json.errors[0]){
                       var errMsg = json.errors[0].message || json.errors[0].code;
+                      console.log('[PICKLIST][Amazon] API error for ' + aCode + ': ' + errMsg);
                       serveStaleOrError(errMsg, { error: errMsg, pending: [] }); return;
                     }
                     var payload = json.payload || {};
+                    var rawCount = (payload.Orders || []).length;
                     var orders = (payload.Orders || []).filter(function(o){
                       // MFN only — skip Amazon-Fulfilled (FBA) since Amazon ships those
                       return o.FulfillmentChannel === 'MFN' && snoozedIds.indexOf(o.AmazonOrderId) === -1;
                     });
+                    console.log('[PICKLIST][Amazon] ' + aCode + ' raw=' + rawCount + ' mfn-after-snooze=' + orders.length + ' snoozedIds=' + snoozedIds.length);
                     allOrders = allOrders.concat(orders);
                     if(payload.NextToken){ fetchOrders(payload.NextToken); return; }
                     // 2) For each order, get items (with MongoDB cache)
                     enrichAndRespond();
-                  } catch(e){ serveStaleOrError('Parse error', { error: 'Parse error', pending: [] }); }
+                  } catch(e){ console.log('[PICKLIST][Amazon] Parse error:', e.message); serveStaleOrError('Parse error', { error: 'Parse error', pending: [] }); }
                 });
               });
               aReq.on('error', function(e){ serveStaleOrError(e.message, { error: e.message, pending: [] }); });
@@ -2150,7 +2153,10 @@ var server = http.createServer(function(req, res) {
 
             function enrichAndRespond(){
               if(!allOrders.length){
-                res.writeHead(200); res.end(JSON.stringify({ pending: [], canceled: [], actionNeeded: [] })); return;
+                var emptyBody = { pending: [], canceled: [], actionNeeded: [] };
+                global._amzPicklistCache[aCode] = { ts: Date.now(), data: emptyBody };
+                console.log('[PICKLIST][Amazon] ' + aCode + ' — returning empty (0 orders)');
+                res.writeHead(200); res.end(JSON.stringify(emptyBody)); return;
               }
               // Look up cached items for these orders in MongoDB
               var orderIds = allOrders.map(function(o){ return o.AmazonOrderId; });
