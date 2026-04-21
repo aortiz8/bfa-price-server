@@ -2035,7 +2035,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 3 * 60 * 1000); // every 3 min — balance sync freshness with Amazon quota
+  }, 2 * 60 * 1000); // every 2 min — checkpoint bug is fixed, quota protected by 3-min shared cache TTL
   console.log('[sync] Scheduler started');
 }
 
