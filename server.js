@@ -1744,10 +1744,13 @@ function deleteAmazonListing(accessToken, sellerId, sku, marketplaceId, cb){
     r.on('data', function(c){ data += c; });
     r.on('end', function(){
       if(r.statusCode >= 200 && r.statusCode < 300){ cb(null); return; }
-      // 403/404 typically means the SKU is not in active Amazon listings
-      // (never listed there, already deleted, or already sold). Not an error for sync purposes.
+      // 403/404 MAY mean the listing is already gone, OR it may mean a real permission issue.
+      // Verify by GET-ing the listing and checking if it exists.
       if(r.statusCode === 403 || r.statusCode === 404){
-        cb(null, { alreadyGone: true, statusCode: r.statusCode }); return;
+        verifyAmazonListingGone(accessToken, sellerId, sku, marketplaceId, r.statusCode, function(verifyInfo){
+          cb(null, verifyInfo);
+        });
+        return;
       }
       try {
         var json = JSON.parse(data);
@@ -1758,6 +1761,52 @@ function deleteAmazonListing(accessToken, sellerId, sku, marketplaceId, cb){
   aReq.on('error', function(e){ cb(e.message); });
   aReq.setTimeout(15000, function(){ aReq.destroy(); cb('Timeout'); });
   aReq.end();
+}
+
+// Verify a listing is actually gone from Amazon by GET-ing it.
+// Returns verification info to attach to the sync log.
+function verifyAmazonListingGone(accessToken, sellerId, sku, marketplaceId, deleteStatusCode, cb){
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku)
+         + '?marketplaceIds=' + marketplaceId,
+    method: 'GET',
+    headers: { 'x-amz-access-token': accessToken }
+  };
+  var gReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      // If GET returns 404, listing is truly gone — confirmed alreadyGone.
+      if(r.statusCode === 404){
+        cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: true, verifiedGone: true });
+        return;
+      }
+      // If GET returns 200, listing EXISTS — the 403 was a permissions/other issue.
+      if(r.statusCode >= 200 && r.statusCode < 300){
+        // Parse to check if it has status indicating it's ended or active
+        try {
+          var json = JSON.parse(data);
+          var status = (json.summaries && json.summaries[0] && json.summaries[0].status) || [];
+          var isActive = status.some(function(s){ return s.toUpperCase && s.toUpperCase() !== 'DISCOVERABLE' && s.toUpperCase() !== 'BUYABLE' && s.toUpperCase() === 'BUYABLE'; });
+          // If the listing exists at all, flag as "exists - not actually gone"
+          cb({ alreadyGone: false, statusCode: deleteStatusCode, verified: true, verifiedGone: false, verifyNote: 'Listing still exists on Amazon despite 403 on delete' });
+        } catch(e){
+          cb({ alreadyGone: false, statusCode: deleteStatusCode, verified: true, verifiedGone: false, verifyNote: 'Listing still exists on Amazon (parse error)' });
+        }
+        return;
+      }
+      // 403 on GET too — probably a permissions issue, not an actual state
+      if(r.statusCode === 403){
+        cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET also returned 403 — cannot verify' });
+        return;
+      }
+      cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET returned ' + r.statusCode });
+    });
+  });
+  gReq.on('error', function(){ cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET verification failed' }); });
+  gReq.setTimeout(10000, function(){ gReq.destroy(); cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET verification timeout' }); });
+  gReq.end();
 }
 
 // Log a sync action
@@ -1985,13 +2034,29 @@ async function runSyncCycle(subscriberCode){
           asin: record2.asin, action: 'delete-amazon-listing',
           success: false, error: delErr, needsReview: true
         });
+      } else if(delInfo.alreadyGone === false && delInfo.verified){
+        // The 403 was misleading — GET confirmed the listing STILL EXISTS on Amazon.
+        // This is a real failure that needs manual review.
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          asin: record2.asin, action: 'delete-amazon-listing',
+          success: false,
+          error: 'Delete got 403 but listing still exists on Amazon',
+          reason: delInfo.verifyNote || 'Verified: listing still active',
+          needsReview: true
+        });
       } else {
-        // Success OR alreadyGone (403/404 = not in Amazon anymore anyway)
+        // Success OR confirmed alreadyGone (404 on GET verifies it's truly gone)
+        var verifiedTxt = '';
+        if(delInfo.alreadyGone){
+          if(delInfo.verifiedGone) verifiedTxt = ' · verified gone';
+          else if(delInfo.verified === false) verifiedTxt = ' · verify ' + (delInfo.verifyNote || 'skipped');
+        }
         logSyncAction(subscriberCode, {
           sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           asin: record2.asin, action: 'delete-amazon-listing',
           success: true,
-          reason: delInfo.alreadyGone ? 'Already removed from Amazon (' + delInfo.statusCode + ')' : undefined
+          reason: delInfo.alreadyGone ? ('Already removed from Amazon (' + delInfo.statusCode + ')' + verifiedTxt) : undefined
         });
         await database.collection('warehouse_inventory').updateOne(
           { code: subscriberCode, sku: eo.sku },
