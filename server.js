@@ -807,6 +807,457 @@ function uploadPicture(base64Image, userToken, devId, cb) {
   req.write(bodyBuffer); req.end();
 }
 
+// ===================== REPRICER ENGINE =====================
+// Tracks running cycles per subscriber so we don't double-run
+var repricerRunning = {};
+// Tracks last cycle start time (for scheduler interval)
+var repricerSchedulerInterval = null;
+
+// Sleep helper
+function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
+
+// Build the list of allowed conditions given "my" condition + match mode
+function allowedConditionsFor(myCondition, matchMode){
+  var c = (myCondition || '').toLowerCase();
+  if(matchMode === 'strict'){
+    if(c === 'new') return ['New'];
+    if(c === 'like new' || c === 'likenew') return ['UsedLikeNew'];
+    if(c === 'very good' || c === 'verygood') return ['UsedVeryGood'];
+    if(c === 'good') return ['UsedGood'];
+    if(c === 'acceptable') return ['UsedAcceptable'];
+    return [];
+  }
+  if(matchMode === 'loose'){
+    if(c === 'new') return ['New'];
+    return ['UsedLikeNew','UsedVeryGood','UsedGood','UsedAcceptable'];
+  }
+  // smart (default)
+  if(c === 'new') return ['New'];
+  if(c === 'like new' || c === 'likenew') return ['UsedLikeNew','UsedVeryGood','UsedGood'];
+  if(c === 'very good' || c === 'verygood') return ['UsedVeryGood','UsedGood'];
+  if(c === 'good') return ['UsedGood'];
+  if(c === 'acceptable') return ['UsedAcceptable'];
+  return [];
+}
+
+// Apply the configured undercut strategy to a set of competing offers
+// offers = [{price, condition, fulfillment, sellerId}] sorted ascending by price
+// Returns { targetPrice, reason } or null if no valid target
+function calcTargetFromOffers(offers, mySellerId, config){
+  var competing = offers.filter(function(o){ return o.sellerId !== mySellerId; });
+  // Fulfillment filter
+  if(config.fulfillmentFilter === 'fbm-only'){
+    competing = competing.filter(function(o){ return o.fulfillment === 'FBM'; });
+  }
+  // else 'all' — keep everything; 'fbm-plus-fba-above-threshold' requires threshold config which we skip for now
+  if(!competing.length) return null;
+  competing.sort(function(a,b){ return a.price - b.price; });
+
+  var lowest = competing[0];
+  var secondLowest = competing[1];
+  var anchor = lowest;
+  var reasonPrefix = 'Lowest match';
+  if(config.undercutStrategy === 'second-lowest-penny' && secondLowest){
+    anchor = secondLowest;
+    reasonPrefix = '2nd lowest match';
+  }
+
+  var target;
+  switch(config.undercutStrategy){
+    case 'match':       target = anchor.price; break;
+    case 'percent1':    target = anchor.price * 0.99; break;
+    case 'percent2':    target = anchor.price * 0.98; break;
+    case 'percent5':    target = anchor.price * 0.95; break;
+    case 'dollar50':    target = anchor.price - 0.50; break;
+    case 'dollar100':   target = anchor.price - 1.00; break;
+    case 'second-lowest-penny':
+    case 'penny':
+    default:            target = anchor.price - 0.01; break;
+  }
+  // Round to 2 decimals
+  target = Math.round(target * 100) / 100;
+  return {
+    targetPrice: target,
+    reason: reasonPrefix + ' $' + anchor.price.toFixed(2) + ' (' + anchor.condition + ', ' + anchor.fulfillment + ')'
+  };
+}
+
+// Apply guards (floor, max drop, max increase, direction)
+// Returns { finalPrice, skipped, reason }
+function applyGuards(currentPrice, targetPrice, config){
+  var floor = config.floorPrice || 0;
+  if(targetPrice < floor){
+    targetPrice = floor;
+  }
+  if(targetPrice === currentPrice){
+    return { skipped: true, reason: 'Already at target price' };
+  }
+  // Direction filter
+  if(config.direction === 'down' && targetPrice > currentPrice){
+    return { skipped: true, reason: 'Direction=down, target higher than current' };
+  }
+  if(config.direction === 'up' && targetPrice < currentPrice){
+    return { skipped: true, reason: 'Direction=up, target lower than current' };
+  }
+  // Clamp by max drop / max increase
+  if(targetPrice < currentPrice){
+    var maxDrop = (config.maxDropPct || 0) / 100;
+    var minAllowed = currentPrice * (1 - maxDrop);
+    if(targetPrice < minAllowed){
+      targetPrice = Math.round(minAllowed * 100) / 100;
+    }
+  } else if(targetPrice > currentPrice){
+    var maxIncr = (config.maxIncreasePct || 0) / 100;
+    var maxAllowed = currentPrice * (1 + maxIncr);
+    if(targetPrice > maxAllowed){
+      targetPrice = Math.round(maxAllowed * 100) / 100;
+    }
+  }
+  // After clamping, recheck floor
+  if(targetPrice < floor) targetPrice = floor;
+  if(targetPrice === currentPrice){
+    return { skipped: true, reason: 'After guards, no change needed' };
+  }
+  return { finalPrice: targetPrice };
+}
+
+// Fetch competing offers from Amazon SP-API Product Pricing for a given ASIN
+// Returns [{price, condition, fulfillment, sellerId}]
+function fetchAmazonOffers(accessToken, marketplaceId, asin, cb){
+  if(!asin) { cb('No ASIN', []); return; }
+  var path = '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers'
+           + '?MarketplaceId=' + marketplaceId
+           + '&ItemCondition=Used';
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: path, method: 'GET',
+    headers: { 'x-amz-access-token': accessToken }
+  };
+  var aReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.errors && json.errors[0]){
+          cb(json.errors[0].message || json.errors[0].code, []);
+          return;
+        }
+        var payload = (json.payload && json.payload.Offers) || [];
+        var offers = payload.map(function(o){
+          var price = 0;
+          if(o.ListingPrice && typeof o.ListingPrice.Amount === 'number') price = o.ListingPrice.Amount;
+          var shipping = (o.Shipping && typeof o.Shipping.Amount === 'number') ? o.Shipping.Amount : 0;
+          return {
+            price: price + shipping, // landed price
+            condition: o.SubCondition ? 'Used' + o.SubCondition : (o.ItemCondition || 'Unknown'),
+            fulfillment: o.IsFulfilledByAmazon ? 'FBA' : 'FBM',
+            sellerId: o.SellerId || ''
+          };
+        });
+        cb(null, offers);
+      } catch(e){ cb('Parse error: ' + e.message, []); }
+    });
+  });
+  aReq.on('error', function(e){ cb(e.message, []); });
+  aReq.setTimeout(15000, function(){ aReq.destroy(); cb('Timeout', []); });
+  aReq.end();
+}
+
+// PATCH an Amazon listing price (requires Listings API)
+function patchAmazonListingPrice(accessToken, sellerId, sku, newPrice, marketplaceId, cb){
+  var body = JSON.stringify({
+    productType: 'PRODUCT',
+    patches: [{
+      op: 'replace',
+      path: '/attributes/purchasable_offer',
+      value: [{
+        marketplace_id: marketplaceId,
+        currency: 'USD',
+        our_price: [{ schedule: [{ value_with_tax: newPrice.toFixed(2) }] }]
+      }]
+    }]
+  });
+  var path = '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku)
+           + '?marketplaceIds=' + marketplaceId;
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: path, method: 'PATCH',
+    headers: {
+      'x-amz-access-token': accessToken,
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body)
+    }
+  };
+  var aReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.status === 'ACCEPTED' || json.status === 'VALID' || (json.issues && json.issues.length === 0)){
+          cb(null, json);
+        } else if(json.errors && json.errors[0]){
+          cb(json.errors[0].message || 'Patch failed', json);
+        } else {
+          cb(null, json);
+        }
+      } catch(e){ cb('Parse error', null); }
+    });
+  });
+  aReq.on('error', function(e){ cb(e.message, null); });
+  aReq.setTimeout(20000, function(){ aReq.destroy(); cb('Timeout', null); });
+  aReq.write(body); aReq.end();
+}
+
+// Update an eBay listing price via Trading API ReviseItem
+function reviseEbayListingPrice(subscriberCode, itemId, newPrice, cb){
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found'); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<Item>'
+      +     '<ItemID>' + itemId + '</ItemID>'
+      +     '<StartPrice>' + newPrice.toFixed(2) + '</StartPrice>'
+      +   '</Item>'
+      + '</ReviseItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'ReviseItem',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        if(data.indexOf('<Ack>Success</Ack>') !== -1 || data.indexOf('<Ack>Warning</Ack>') !== -1){
+          cb(null);
+        } else {
+          var m = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+          cb(m ? m[1] : 'eBay revise failed');
+        }
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message); });
+    eReq.setTimeout(15000, function(){ eReq.destroy(); cb('Timeout'); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
+// Log a repricing event to MongoDB
+function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, reason, dryRun, skipped, cycleId){
+  connectMongo(function(err, database){
+    if(err || !database) return;
+    database.collection('reprice_history').insertOne({
+      subscriberCode: subscriberCode,
+      sku: sku,
+      platform: platform,
+      oldPrice: oldPrice || 0,
+      newPrice: newPrice || 0,
+      reason: reason || '',
+      dryRun: !!dryRun,
+      skipped: !!skipped,
+      cycleId: cycleId || '',
+      createdAt: new Date()
+    }).catch(function(){});
+  });
+}
+
+// Main cycle runner — async, processes all qualifying warehouse-tool listings
+async function runRepricerCycle(subscriberCode){
+  if(repricerRunning[subscriberCode]){
+    console.log('[repricer] Cycle already running for', subscriberCode);
+    return;
+  }
+  repricerRunning[subscriberCode] = true;
+  var cycleId = Date.now().toString();
+  console.log('[repricer] Starting cycle', cycleId, 'for', subscriberCode);
+
+  try {
+    // Load subscriber + config
+    var sub = await new Promise(function(resolve){ getSubscriber(subscriberCode, function(err, s){ resolve(s); }); });
+    if(!sub){ console.log('[repricer] No sub found'); repricerRunning[subscriberCode] = false; return; }
+    var config = Object.assign({
+      enabled: false, dryRun: true, direction: 'both', floorPrice: 5.99,
+      maxDropPct: 15, maxIncreasePct: 20, cycleIntervalDays: 1, ebayDiscountPct: 15,
+      conditionMatch: 'smart', undercutStrategy: 'penny', fulfillmentFilter: 'fbm-only',
+      excludedSkus: []
+    }, sub.repricer || {});
+
+    var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+    var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+    var excludedSet = {};
+    (config.excludedSkus || []).forEach(function(s){ excludedSet[s] = true; });
+
+    // Mark start
+    var database = await new Promise(function(resolve){ connectMongo(function(err, d){ resolve(d); }); });
+    if(!database){ console.log('[repricer] No DB'); repricerRunning[subscriberCode] = false; return; }
+    await database.collection('subscribers').updateOne(
+      { code: { $regex: new RegExp('^' + subscriberCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+      { $set: { 'repricer.lastRunStartedAt': new Date().toISOString(), 'repricer.lastRunCompletedAt': null } }
+    );
+
+    // Fetch all warehouse-tool listings for this subscriber
+    var listings = await database.collection('warehouse_inventory').find({
+      code: subscriberCode,
+      $or: [
+        { status: { $ne: 'sold' } },
+        { status: { $exists: false } }
+      ]
+    }).toArray();
+
+    console.log('[repricer]', listings.length, 'listings to check for', subscriberCode);
+
+    // Get Amazon access token
+    var accessToken = await new Promise(function(resolve, reject){
+      getAmazonAccessToken(function(err, tok){ if(err) reject(err); else resolve(tok); });
+    });
+
+    var processed = 0, patched = 0, skipped = 0, errors = 0;
+
+    for(var i = 0; i < listings.length; i++){
+      var listing = listings[i];
+      var sku = listing.sku;
+      if(!sku){ continue; }
+      if(excludedSet[sku]){
+        logRepriceHistory(subscriberCode, sku, 'amazon', listing.price, listing.price, 'Excluded by user', config.dryRun, true, cycleId);
+        skipped++; continue;
+      }
+      if(!listing.asin){
+        skipped++; continue;
+      }
+
+      processed++;
+
+      // Throttle: 1 request/sec to stay within SP-API Pricing quota
+      await sleep(1100);
+
+      try {
+        // Fetch offers
+        var offers = await new Promise(function(resolve){
+          fetchAmazonOffers(accessToken, marketplaceId, listing.asin, function(err, o){
+            if(err){ resolve([]); } else { resolve(o); }
+          });
+        });
+
+        // Filter by allowed conditions
+        var allowedConds = allowedConditionsFor(listing.condition, config.conditionMatch);
+        var filteredOffers = offers.filter(function(o){
+          return allowedConds.some(function(c){ return c.toLowerCase() === (o.condition||'').toLowerCase(); });
+        });
+
+        if(!filteredOffers.length){
+          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No matching-condition offers', config.dryRun, true, cycleId);
+          skipped++;
+          continue;
+        }
+
+        var result = calcTargetFromOffers(filteredOffers, sellerId, config);
+        if(!result){
+          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No competing offers', config.dryRun, true, cycleId);
+          skipped++;
+          continue;
+        }
+
+        var currentPrice = parseFloat(listing.price) || 0;
+        var guards = applyGuards(currentPrice, result.targetPrice, config);
+        if(guards.skipped){
+          logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, currentPrice, result.reason + ' · ' + guards.reason, config.dryRun, true, cycleId);
+          skipped++;
+          continue;
+        }
+
+        var finalAmazonPrice = guards.finalPrice;
+
+        // Amazon patch
+        if(!config.dryRun){
+          await new Promise(function(resolve){
+            patchAmazonListingPrice(accessToken, sellerId, sku, finalAmazonPrice, marketplaceId, function(err){
+              resolve();
+            });
+          });
+          // Update local listing record
+          await database.collection('warehouse_inventory').updateOne(
+            { code: subscriberCode, sku: sku },
+            { $set: { price: finalAmazonPrice, lastRepriced: new Date() } }
+          );
+        }
+        logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, finalAmazonPrice, result.reason, config.dryRun, false, cycleId);
+
+        // eBay mirror price — Amazon price × (1 - ebayDiscountPct/100)
+        var ebayPrice = Math.round(finalAmazonPrice * (1 - (config.ebayDiscountPct || 0) / 100) * 100) / 100;
+        if(ebayPrice < config.floorPrice) ebayPrice = config.floorPrice;
+        var currentEbayPrice = parseFloat(listing.ebayPrice || listing.price) || 0;
+        if(Math.abs(ebayPrice - currentEbayPrice) >= 0.01 && listing.ebayItemId){
+          if(!config.dryRun){
+            await new Promise(function(resolve){
+              reviseEbayListingPrice(subscriberCode, listing.ebayItemId, ebayPrice, function(err){ resolve(); });
+            });
+            await database.collection('warehouse_inventory').updateOne(
+              { code: subscriberCode, sku: sku },
+              { $set: { ebayPrice: ebayPrice } }
+            );
+          }
+          logRepriceHistory(subscriberCode, sku, 'ebay', currentEbayPrice, ebayPrice, 'Mirror of Amazon price (-' + (config.ebayDiscountPct||0) + '%)', config.dryRun, false, cycleId);
+        }
+
+        patched++;
+      } catch(e){
+        console.log('[repricer] SKU', sku, 'error:', e.message);
+        errors++;
+      }
+    }
+
+    // Mark complete
+    var summary = { processed: processed, patched: patched, skipped: skipped, errors: errors, total: listings.length };
+    await database.collection('subscribers').updateOne(
+      { code: { $regex: new RegExp('^' + subscriberCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+      { $set: { 'repricer.lastRunCompletedAt': new Date().toISOString(), 'repricer.lastRunSummary': summary } }
+    );
+    console.log('[repricer] Cycle done:', JSON.stringify(summary));
+  } catch(e){
+    console.log('[repricer] Cycle error:', e.message);
+  } finally {
+    repricerRunning[subscriberCode] = false;
+  }
+}
+
+// Scheduler — checks every hour if any subscriber needs a cycle based on their interval
+function startRepricerScheduler(){
+  if(repricerSchedulerInterval) return;
+  repricerSchedulerInterval = setInterval(function(){
+    connectMongo(function(err, database){
+      if(err || !database) return;
+      database.collection('subscribers').find({ 'repricer.enabled': true }).toArray()
+        .then(function(subs){
+          subs.forEach(function(sub){
+            var cfg = sub.repricer || {};
+            if(!cfg.enabled) return;
+            var intervalMs = (cfg.cycleIntervalDays || 1) * 86400000;
+            var lastStart = cfg.lastRunStartedAt ? new Date(cfg.lastRunStartedAt).getTime() : 0;
+            if(Date.now() - lastStart >= intervalMs){
+              console.log('[repricer] Scheduler triggering cycle for', sub.code);
+              runRepricerCycle(sub.code.toUpperCase());
+            }
+          });
+        })
+        .catch(function(){});
+    });
+  }, 60 * 60 * 1000); // every 60 min
+  console.log('[repricer] Scheduler started');
+}
+
+// Kick off scheduler on startup
+setTimeout(startRepricerScheduler, 10000);
+
 // ===================== MAIN SERVER =====================
 var server = http.createServer(function(req, res) {
   addSecurityHeaders(res);
