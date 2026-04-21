@@ -1393,6 +1393,410 @@ async function runEbayEnrich(subscriberCode){
   }
 }
 
+// ===================== CROSS-PLATFORM SYNC ENGINE =====================
+// Polls every 2 min for new orders on Amazon and eBay.
+// When a sale is detected on one platform, ends/deletes the twin on the other.
+var syncRunning = {};           // Locks per subscriber
+var syncSchedulerInterval = null;
+
+// Fetch recent Amazon orders created after a timestamp (MFN only)
+function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
+  var qp = 'MarketplaceIds=' + marketplaceId
+         + '&CreatedAfter=' + encodeURIComponent(sinceIso);
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: '/orders/v0/orders?' + qp,
+    method: 'GET',
+    headers: { 'x-amz-access-token': accessToken }
+  };
+  var aReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.errors && json.errors[0]){ cb(json.errors[0].message, []); return; }
+        var orders = ((json.payload && json.payload.Orders) || []).filter(function(o){
+          return o.FulfillmentChannel === 'MFN';
+        });
+        cb(null, orders);
+      } catch(e){ cb('Parse error', []); }
+    });
+  });
+  aReq.on('error', function(e){ cb(e.message, []); });
+  aReq.setTimeout(20000, function(){ aReq.destroy(); cb('Timeout', []); });
+  aReq.end();
+}
+
+// Fetch items in an Amazon order (returns [{sku, quantity}])
+function fetchAmazonOrderItems(accessToken, orderId, cb){
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: '/orders/v0/orders/' + encodeURIComponent(orderId) + '/orderItems',
+    method: 'GET',
+    headers: { 'x-amz-access-token': accessToken }
+  };
+  var aReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      try {
+        var json = JSON.parse(data);
+        if(json.errors && json.errors[0]){ cb(json.errors[0].message, []); return; }
+        var items = ((json.payload && json.payload.OrderItems) || []).map(function(it){
+          return { sku: it.SellerSKU, quantity: it.QuantityOrdered || 1 };
+        });
+        cb(null, items);
+      } catch(e){ cb('Parse error', []); }
+    });
+  });
+  aReq.on('error', function(e){ cb(e.message, []); });
+  aReq.setTimeout(15000, function(){ aReq.destroy(); cb('Timeout', []); });
+  aReq.end();
+}
+
+// Fetch eBay orders via GetOrders since a timestamp
+function fetchRecentEbayOrders(subscriberCode, sinceIso, cb){
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found'); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    if(!token){ cb('No eBay token'); return; }
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetOrdersRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<CreateTimeFrom>' + sinceIso + '</CreateTimeFrom>'
+      +   '<CreateTimeTo>' + new Date().toISOString() + '</CreateTimeTo>'
+      +   '<OrderStatus>Active</OrderStatus>'
+      +   '<DetailLevel>ReturnAll</DetailLevel>'
+      + '</GetOrdersRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetOrders',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        // Extract orders → transactions → SKU
+        var orders = [];
+        var reOrder = /<Order>([\s\S]*?)<\/Order>/g;
+        var m;
+        while((m = reOrder.exec(data)) !== null){
+          var block = m[1];
+          var orderIdMatch = block.match(/<OrderID>([^<]+)<\/OrderID>/);
+          var orderId = orderIdMatch ? orderIdMatch[1] : null;
+          var reTx = /<Transaction>([\s\S]*?)<\/Transaction>/g;
+          var tx;
+          while((tx = reTx.exec(block)) !== null){
+            var txBlock = tx[1];
+            var skuMatch = txBlock.match(/<SKU>([^<]+)<\/SKU>/);
+            var itemIdMatch = txBlock.match(/<ItemID>([^<]+)<\/ItemID>/);
+            var qtyMatch = txBlock.match(/<QuantityPurchased>(\d+)<\/QuantityPurchased>/);
+            if(skuMatch){
+              orders.push({
+                orderId: orderId,
+                sku: skuMatch[1],
+                itemId: itemIdMatch ? itemIdMatch[1] : null,
+                quantity: qtyMatch ? parseInt(qtyMatch[1]) : 1
+              });
+            }
+          }
+        }
+        cb(null, orders);
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message, []); });
+    eReq.setTimeout(30000, function(){ eReq.destroy(); cb('Timeout', []); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
+// End an eBay listing by ItemID via Trading API EndItem
+function endEbayListing(subscriberCode, itemId, cb){
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found'); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<EndItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<ItemID>' + itemId + '</ItemID>'
+      +   '<EndingReason>NotAvailable</EndingReason>'
+      + '</EndItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'EndItem',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        if(data.indexOf('<Ack>Success</Ack>') !== -1 || data.indexOf('<Ack>Warning</Ack>') !== -1){
+          cb(null);
+        } else {
+          var err = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+          cb(err ? err[1] : 'eBay EndItem failed');
+        }
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message); });
+    eReq.setTimeout(15000, function(){ eReq.destroy(); cb('Timeout'); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
+// Delete an Amazon listing (Listings API DELETE)
+function deleteAmazonListing(accessToken, sellerId, sku, marketplaceId, cb){
+  var opts = {
+    hostname: 'sellingpartnerapi-na.amazon.com',
+    path: '/listings/2021-08-01/items/' + encodeURIComponent(sellerId) + '/' + encodeURIComponent(sku)
+         + '?marketplaceIds=' + marketplaceId,
+    method: 'DELETE',
+    headers: { 'x-amz-access-token': accessToken }
+  };
+  var aReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      if(r.statusCode >= 200 && r.statusCode < 300){ cb(null); return; }
+      try {
+        var json = JSON.parse(data);
+        cb(json.errors && json.errors[0] ? json.errors[0].message : ('HTTP ' + r.statusCode));
+      } catch(e){ cb('HTTP ' + r.statusCode); }
+    });
+  });
+  aReq.on('error', function(e){ cb(e.message); });
+  aReq.setTimeout(15000, function(){ aReq.destroy(); cb('Timeout'); });
+  aReq.end();
+}
+
+// Log a sync action
+function logSyncAction(subscriberCode, record){
+  connectMongo(function(err, database){
+    if(err || !database) return;
+    database.collection('sync_log').insertOne(Object.assign({
+      subscriberCode: subscriberCode,
+      createdAt: new Date()
+    }, record)).catch(function(){});
+  });
+}
+
+// Main sync cycle for one subscriber
+async function runSyncCycle(subscriberCode){
+  if(syncRunning[subscriberCode]) return;
+  syncRunning[subscriberCode] = true;
+
+  try {
+    var sub = await new Promise(function(resolve){ getSubscriber(subscriberCode, function(err, s){ resolve(s); }); });
+    if(!sub){ syncRunning[subscriberCode] = false; return; }
+    if(!sub.sync || !sub.sync.enabled){ syncRunning[subscriberCode] = false; return; }
+
+    var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+    var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+    var database = await new Promise(function(resolve){ connectMongo(function(err, d){ resolve(d); }); });
+    if(!database){ syncRunning[subscriberCode] = false; return; }
+
+    // Determine "since" timestamp (default: 10 minutes ago if first run)
+    var lastAmazon = sub.sync.lastAmazonCheckedAt ? new Date(sub.sync.lastAmazonCheckedAt) : new Date(Date.now() - 10*60*1000);
+    var lastEbay = sub.sync.lastEbayCheckedAt ? new Date(sub.sync.lastEbayCheckedAt) : new Date(Date.now() - 10*60*1000);
+    // Amazon CreatedAfter must be at least 1 min ago
+    var amazonSince = new Date(Math.min(Date.now() - 60*1000, lastAmazon.getTime())).toISOString();
+    var ebaySince = new Date(lastEbay.getTime()).toISOString();
+
+    // Get Amazon token
+    var accessToken = await new Promise(function(resolve, reject){
+      getAmazonAccessToken(function(err, tok){ if(err) reject(err); else resolve(tok); });
+    });
+
+    // ── AMAZON SIDE ──
+    var amazonOrders = await new Promise(function(resolve){
+      fetchRecentAmazonOrders(accessToken, marketplaceId, amazonSince, function(err, orders){
+        resolve(err ? [] : orders);
+      });
+    });
+
+    // Track already-processed Amazon order IDs so we don't re-end eBay listings
+    var processedAmazon = await database.collection('sync_log').find({
+      subscriberCode: subscriberCode,
+      soldPlatform: 'amazon',
+      amazonOrderId: { $in: amazonOrders.map(function(o){ return o.AmazonOrderId; }) }
+    }).project({ amazonOrderId: 1 }).toArray();
+    var processedAmazonSet = {};
+    processedAmazon.forEach(function(p){ processedAmazonSet[p.amazonOrderId] = true; });
+
+    for(var i = 0; i < amazonOrders.length; i++){
+      var order = amazonOrders[i];
+      if(processedAmazonSet[order.AmazonOrderId]) continue;
+
+      var items = await new Promise(function(resolve){
+        fetchAmazonOrderItems(accessToken, order.AmazonOrderId, function(err, its){ resolve(err ? [] : its); });
+      });
+
+      for(var j = 0; j < items.length; j++){
+        var sku = items[j].sku;
+        if(!sku) continue;
+
+        // Look up in warehouse_inventory
+        var record = await database.collection('warehouse_inventory').findOne({ code: subscriberCode, sku: sku });
+
+        if(!record){
+          logSyncAction(subscriberCode, {
+            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+            action: 'skip', reason: 'SKU not in warehouse_inventory', success: false
+          });
+          continue;
+        }
+
+        if(!record.ebayItemId){
+          logSyncAction(subscriberCode, {
+            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+            action: 'skip', reason: 'No eBay ItemID linked', success: true
+          });
+          // Still mark sold
+          await database.collection('warehouse_inventory').updateOne(
+            { code: subscriberCode, sku: sku },
+            { $set: { status: 'sold-amazon', soldAt: new Date(), soldOrderId: order.AmazonOrderId } }
+          );
+          continue;
+        }
+
+        // End eBay listing
+        var endErr = await new Promise(function(resolve){
+          endEbayListing(subscriberCode, record.ebayItemId, function(err){ resolve(err); });
+        });
+
+        if(endErr){
+          logSyncAction(subscriberCode, {
+            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+            ebayItemId: record.ebayItemId, action: 'end-ebay-listing',
+            success: false, error: endErr, needsReview: true
+          });
+        } else {
+          logSyncAction(subscriberCode, {
+            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+            ebayItemId: record.ebayItemId, action: 'end-ebay-listing', success: true
+          });
+          await database.collection('warehouse_inventory').updateOne(
+            { code: subscriberCode, sku: sku },
+            { $set: { status: 'sold-amazon', soldAt: new Date(), soldOrderId: order.AmazonOrderId } }
+          );
+        }
+      }
+    }
+
+    // ── EBAY SIDE ──
+    var ebayOrders = await new Promise(function(resolve){
+      fetchRecentEbayOrders(subscriberCode, ebaySince, function(err, orders){
+        resolve(err ? [] : orders);
+      });
+    });
+
+    // Dedupe by order ID to avoid re-processing
+    var processedEbay = await database.collection('sync_log').find({
+      subscriberCode: subscriberCode,
+      soldPlatform: 'ebay',
+      ebayOrderId: { $in: ebayOrders.map(function(o){ return o.orderId; }).filter(Boolean) }
+    }).project({ ebayOrderId: 1 }).toArray();
+    var processedEbaySet = {};
+    processedEbay.forEach(function(p){ processedEbaySet[p.ebayOrderId] = true; });
+
+    for(var k = 0; k < ebayOrders.length; k++){
+      var eo = ebayOrders[k];
+      if(eo.orderId && processedEbaySet[eo.orderId]) continue;
+      if(!eo.sku) continue;
+
+      var record2 = await database.collection('warehouse_inventory').findOne({ code: subscriberCode, sku: eo.sku });
+      if(!record2){
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          action: 'skip', reason: 'SKU not in warehouse_inventory', success: false
+        });
+        continue;
+      }
+
+      if(!record2.asin){
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          action: 'skip', reason: 'No Amazon ASIN linked', success: true
+        });
+        await database.collection('warehouse_inventory').updateOne(
+          { code: subscriberCode, sku: eo.sku },
+          { $set: { status: 'sold-ebay', soldAt: new Date(), soldOrderId: eo.orderId } }
+        );
+        continue;
+      }
+
+      // Delete Amazon listing
+      var delErr = await new Promise(function(resolve){
+        deleteAmazonListing(accessToken, sellerId, eo.sku, marketplaceId, function(err){ resolve(err); });
+      });
+
+      if(delErr){
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          asin: record2.asin, action: 'delete-amazon-listing',
+          success: false, error: delErr, needsReview: true
+        });
+      } else {
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          asin: record2.asin, action: 'delete-amazon-listing', success: true
+        });
+        await database.collection('warehouse_inventory').updateOne(
+          { code: subscriberCode, sku: eo.sku },
+          { $set: { status: 'sold-ebay', soldAt: new Date(), soldOrderId: eo.orderId } }
+        );
+      }
+    }
+
+    // Update last-checked timestamps
+    await database.collection('subscribers').updateOne(
+      { code: { $regex: new RegExp('^' + subscriberCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+      { $set: {
+          'sync.lastAmazonCheckedAt': new Date().toISOString(),
+          'sync.lastEbayCheckedAt': new Date().toISOString(),
+          'sync.lastRunAt': new Date().toISOString()
+        }
+      }
+    );
+  } catch(e){
+    console.log('[sync] Cycle error for', subscriberCode, ':', e.message);
+  } finally {
+    syncRunning[subscriberCode] = false;
+  }
+}
+
+// Scheduler — fires every 2 minutes, processes all sync-enabled subscribers
+function startSyncScheduler(){
+  if(syncSchedulerInterval) return;
+  syncSchedulerInterval = setInterval(function(){
+    connectMongo(function(err, database){
+      if(err || !database) return;
+      database.collection('subscribers').find({ 'sync.enabled': true }).toArray()
+        .then(function(subs){
+          subs.forEach(function(sub){ runSyncCycle(sub.code.toUpperCase()); });
+        })
+        .catch(function(){});
+    });
+  }, 2 * 60 * 1000); // every 2 min
+  console.log('[sync] Scheduler started');
+}
+
+setTimeout(startSyncScheduler, 15000);
+
 // ===================== MAIN SERVER =====================
 var server = http.createServer(function(req, res) {
   addSecurityHeaders(res);
@@ -4476,6 +4880,72 @@ var server = http.createServer(function(req, res) {
   // Pulls active eBay listings via GetMyeBaySelling, matches by SKU,
   // stores ebayItemId on each warehouse_inventory record.
   // ───────────────────────────────────────────────────────────
+  // ───────────────────────────────────────────────────────────
+  // CROSS-PLATFORM SYNC settings and log endpoints
+  // ───────────────────────────────────────────────────────────
+  if (pathname === '/my/sync/settings' && req.method === 'GET') {
+    var syCode = (parsed.query.code || '').toUpperCase();
+    var sySess = getRequestSession(req, parsed);
+    if(!sySess || sySess.role !== 'admin' || sySess.subscriberCode !== syCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    getSubscriber(syCode, function(err, sub){
+      if(!sub){ res.writeHead(404); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+      var cfg = sub.sync || { enabled: false };
+      res.writeHead(200); res.end(JSON.stringify({ config: {
+        enabled: !!cfg.enabled,
+        lastAmazonCheckedAt: cfg.lastAmazonCheckedAt || null,
+        lastEbayCheckedAt: cfg.lastEbayCheckedAt || null,
+        lastRunAt: cfg.lastRunAt || null
+      }}));
+    });
+    return;
+  }
+
+  if (pathname === '/my/sync/settings' && req.method === 'PUT') {
+    parseBody(req, function(err, data){
+      var syCode = (data.code || '').toUpperCase();
+      var sySess = getRequestSession(req, parsed);
+      if(!sySess || sySess.role !== 'admin' || sySess.subscriberCode !== syCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      if(typeof data.enabled !== 'boolean'){
+        res.writeHead(400); res.end(JSON.stringify({ error: 'enabled (boolean) required' })); return;
+      }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('subscribers').updateOne(
+          { code: { $regex: new RegExp('^' + syCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+          { $set: { 'sync.enabled': data.enabled } }
+        )
+          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ success: true })); })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // GET /my/sync/log?code=X&limit=100&needsReview=true
+  if (pathname === '/my/sync/log' && req.method === 'GET') {
+    var lCode = (parsed.query.code || '').toUpperCase();
+    var lSess = getRequestSession(req, parsed);
+    if(!lSess || lSess.role !== 'admin' || lSess.subscriberCode !== lCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var limit = Math.min(parseInt(parsed.query.limit || '100') || 100, 500);
+    var filter = { subscriberCode: lCode };
+    if(parsed.query.needsReview === 'true') filter.needsReview = true;
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ log: [] })); return; }
+      database.collection('sync_log').find(filter).sort({ createdAt: -1 }).limit(limit).toArray()
+        .then(function(rows){
+          res.writeHead(200); res.end(JSON.stringify({ log: rows || [] }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ log: [], error: e.message })); });
+    });
+    return;
+  }
+
   if (pathname === '/my/ebay/enrich/run' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var iCode = (data.code || '').toUpperCase();
