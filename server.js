@@ -1660,10 +1660,30 @@ function endEbayListing(subscriberCode, itemId, cb){
       r.on('end', function(){
         if(data.indexOf('<Ack>Success</Ack>') !== -1 || data.indexOf('<Ack>Warning</Ack>') !== -1){
           cb(null);
-        } else {
-          var err = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
-          cb(err ? err[1] : 'eBay EndItem failed');
+          return;
         }
+        // Check if the error is "already ended" or similar — treat as success
+        var errCodeMatch = data.match(/<ErrorCode>([^<]+)<\/ErrorCode>/);
+        var msgMatch = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+        var longMsgMatch = data.match(/<LongMessage>([^<]+)<\/LongMessage>/);
+        var errCode = errCodeMatch ? errCodeMatch[1] : '';
+        var errMsg = msgMatch ? msgMatch[1] : 'eBay EndItem failed';
+        var longMsg = longMsgMatch ? longMsgMatch[1] : '';
+        var combined = (errMsg + ' ' + longMsg).toLowerCase();
+        // Common eBay "already ended" indicators
+        var alreadyGone = (
+          errCode === '1047' ||                          // Auction has already ended
+          errCode === '291' ||                           // Item cannot be accessed
+          combined.indexOf('already ended') !== -1 ||
+          combined.indexOf('already been ended') !== -1 ||
+          combined.indexOf('does not exist') !== -1 ||
+          combined.indexOf('invalid item id') !== -1
+        );
+        if(alreadyGone){
+          cb(null, { alreadyGone: true, reason: errMsg });
+          return;
+        }
+        cb(errMsg);
       });
     });
     eReq.on('error', function(e){ cb(e.message); });
@@ -1686,6 +1706,11 @@ function deleteAmazonListing(accessToken, sellerId, sku, marketplaceId, cb){
     r.on('data', function(c){ data += c; });
     r.on('end', function(){
       if(r.statusCode >= 200 && r.statusCode < 300){ cb(null); return; }
+      // 403/404 typically means the SKU is not in active Amazon listings
+      // (never listed there, already deleted, or already sold). Not an error for sync purposes.
+      if(r.statusCode === 403 || r.statusCode === 404){
+        cb(null, { alreadyGone: true, statusCode: r.statusCode }); return;
+      }
       try {
         var json = JSON.parse(data);
         cb(json.errors && json.errors[0] ? json.errors[0].message : ('HTTP ' + r.statusCode));
@@ -1813,9 +1838,13 @@ async function runSyncCycle(subscriberCode){
         }
 
         // End eBay listing
-        var endErr = await new Promise(function(resolve){
-          endEbayListing(subscriberCode, record.ebayItemId, function(err){ resolve(err); });
+        var endResult = await new Promise(function(resolve){
+          endEbayListing(subscriberCode, record.ebayItemId, function(err, info){
+            resolve({ err: err, info: info });
+          });
         });
+        var endErr = endResult.err;
+        var endInfo = endResult.info || {};
 
         if(endErr){
           logSyncAction(subscriberCode, {
@@ -1879,9 +1908,13 @@ async function runSyncCycle(subscriberCode){
       }
 
       // Delete Amazon listing
-      var delErr = await new Promise(function(resolve){
-        deleteAmazonListing(accessToken, sellerId, eo.sku, marketplaceId, function(err){ resolve(err); });
+      var delResult = await new Promise(function(resolve){
+        deleteAmazonListing(accessToken, sellerId, eo.sku, marketplaceId, function(err, info){
+          resolve({ err: err, info: info });
+        });
       });
+      var delErr = delResult.err;
+      var delInfo = delResult.info || {};
 
       if(delErr){
         logSyncAction(subscriberCode, {
@@ -1890,9 +1923,12 @@ async function runSyncCycle(subscriberCode){
           success: false, error: delErr, needsReview: true
         });
       } else {
+        // Success OR alreadyGone (403/404 = not in Amazon anymore anyway)
         logSyncAction(subscriberCode, {
           sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
-          asin: record2.asin, action: 'delete-amazon-listing', success: true
+          asin: record2.asin, action: 'delete-amazon-listing',
+          success: true,
+          reason: delInfo.alreadyGone ? 'Already removed from Amazon (' + delInfo.statusCode + ')' : undefined
         });
         await database.collection('warehouse_inventory').updateOne(
           { code: subscriberCode, sku: eo.sku },
@@ -5187,6 +5223,57 @@ var server = http.createServer(function(req, res) {
           res.writeHead(200); res.end(JSON.stringify({ log: rows || [] }));
         })
         .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ log: [], error: e.message })); });
+    });
+    return;
+  }
+
+  // Delete all debug/error entries older than now (cleanup noisy entries)
+  if (pathname === '/my/sync/log/clear-debug' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var cCode = (data.code || '').toUpperCase();
+      var cSess = getRequestSession(req, parsed);
+      if(!cSess || cSess.role !== 'admin' || cSess.subscriberCode !== cCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        database.collection('sync_log').deleteMany({
+          subscriberCode: cCode,
+          sku: { $in: ['_debug_', '_error_'] }
+        })
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, deleted: result.deletedCount || 0 }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // Dismiss a specific sync log entry (clear needsReview flag)
+  if (pathname === '/my/sync/log/dismiss' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var dCode = (data.code || '').toUpperCase();
+      var dSess = getRequestSession(req, parsed);
+      if(!dSess || dSess.role !== 'admin' || dSess.subscriberCode !== dCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      if(!data.entryId){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing entryId' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        var ObjectId;
+        try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'No ObjectId' })); return; }
+        var oid;
+        try { oid = new ObjectId(data.entryId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid entryId' })); return; }
+        database.collection('sync_log').updateOne(
+          { _id: oid, subscriberCode: dCode },
+          { $set: { needsReview: false, dismissedAt: new Date() } }
+        )
+          .then(function(result){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, modified: result.modifiedCount || 0 }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
     });
     return;
   }
