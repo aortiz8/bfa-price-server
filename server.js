@@ -1424,8 +1424,9 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
         var orders = rawOrders.filter(function(o){
           return o.FulfillmentChannel === 'MFN';
         });
-        console.log('[SYNC][Amazon] since=' + sinceIso + ' raw=' + rawOrders.length + ' mfn=' + orders.length + ' fulfillmentChannels=' + JSON.stringify(rawOrders.map(function(o){ return o.FulfillmentChannel; })));
-        cb(null, orders);
+        var channels = rawOrders.map(function(o){ return o.FulfillmentChannel || 'null'; });
+        console.log('[SYNC][Amazon] since=' + sinceIso + ' raw=' + rawOrders.length + ' mfn=' + orders.length + ' fulfillmentChannels=' + JSON.stringify(channels));
+        cb(null, orders, { rawCount: rawOrders.length, channels: channels });
       } catch(e){ console.log('[SYNC][Amazon] Parse error:', e.message); cb('Parse error', []); }
     });
   });
@@ -1629,19 +1630,24 @@ async function runSyncCycle(subscriberCode){
 
     // ── AMAZON SIDE ──
     var amazonFetchErr = null;
+    var amazonFetchInfo = null;
     var amazonOrders = await new Promise(function(resolve){
-      fetchRecentAmazonOrders(accessToken, marketplaceId, amazonSince, function(err, orders){
+      fetchRecentAmazonOrders(accessToken, marketplaceId, amazonSince, function(err, orders, info){
         if(err) amazonFetchErr = err;
+        amazonFetchInfo = info || null;
         resolve(err ? [] : orders);
       });
     });
 
     // DEBUG: log amazon fetch status to sync_log so we can see it in UI
+    var dbgReason = 'since ' + amazonSince + ' · raw=' + (amazonFetchInfo ? amazonFetchInfo.rawCount : '?') + ' · mfn=' + amazonOrders.length;
+    if(amazonFetchInfo && amazonFetchInfo.channels) dbgReason += ' · channels=' + amazonFetchInfo.channels.join(',');
+    if(amazonFetchErr) dbgReason += ' — ERROR: ' + amazonFetchErr;
     logSyncAction(subscriberCode, {
       sku: '_debug_',
       soldPlatform: 'amazon',
       action: 'debug-amazon-fetch',
-      reason: 'fetched ' + amazonOrders.length + ' MFN orders since ' + amazonSince + (amazonFetchErr ? ' — ERROR: ' + amazonFetchErr : ''),
+      reason: dbgReason,
       success: !amazonFetchErr
     });
 
@@ -1808,7 +1814,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 2 * 60 * 1000); // every 2 min
+  }, 5 * 60 * 1000); // every 5 min (Amazon SP-API Orders quota is strict)
   console.log('[sync] Scheduler started');
 }
 
