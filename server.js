@@ -1258,6 +1258,141 @@ function startRepricerScheduler(){
 // Kick off scheduler on startup
 setTimeout(startRepricerScheduler, 10000);
 
+// ===================== EBAY ITEM ID ENRICH =====================
+var ebayEnrichRunning = {};
+var ebayEnrichStatus = {};
+
+// Fetch one page of eBay active listings via GetMyeBaySelling
+function fetchEbayActiveListingsPage(token, pageNum, entriesPerPage, cb){
+  var xml = '<?xml version="1.0" encoding="utf-8"?>'
+    + '<GetMyeBaySellingRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+    +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+    +   '<ActiveList>'
+    +     '<Include>true</Include>'
+    +     '<Pagination>'
+    +       '<EntriesPerPage>' + entriesPerPage + '</EntriesPerPage>'
+    +       '<PageNumber>' + pageNum + '</PageNumber>'
+    +     '</Pagination>'
+    +   '</ActiveList>'
+    +   '<DetailLevel>ReturnAll</DetailLevel>'
+    + '</GetMyeBaySellingRequest>';
+  var opts = {
+    hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+    headers: {
+      'X-EBAY-API-CALL-NAME': 'GetMyeBaySelling',
+      'X-EBAY-API-SITEID': '0',
+      'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+      'X-EBAY-API-IAF-TOKEN': token,
+      'Content-Type': 'text/xml',
+      'Content-Length': Buffer.byteLength(xml)
+    }
+  };
+  var eReq = https.request(opts, function(r){
+    var data = '';
+    r.on('data', function(c){ data += c; });
+    r.on('end', function(){
+      // Extract all <Item> blocks under ActiveList
+      var items = [];
+      var activeMatch = data.match(/<ActiveList>[\s\S]*?<\/ActiveList>/);
+      var section = activeMatch ? activeMatch[0] : '';
+      var re = /<Item>([\s\S]*?)<\/Item>/g;
+      var m;
+      while((m = re.exec(section)) !== null){
+        var block = m[1];
+        var idMatch = block.match(/<ItemID>([^<]+)<\/ItemID>/);
+        var skuMatch = block.match(/<SKU>([^<]+)<\/SKU>/);
+        if(idMatch){
+          items.push({
+            itemId: idMatch[1],
+            sku: skuMatch ? skuMatch[1] : ''
+          });
+        }
+      }
+      var totalPagesMatch = section.match(/<TotalNumberOfPages>(\d+)<\/TotalNumberOfPages>/);
+      var totalPages = totalPagesMatch ? parseInt(totalPagesMatch[1]) : 1;
+      var totalEntriesMatch = section.match(/<TotalNumberOfEntries>(\d+)<\/TotalNumberOfEntries>/);
+      var totalEntries = totalEntriesMatch ? parseInt(totalEntriesMatch[1]) : items.length;
+      cb(null, { items: items, totalPages: totalPages, totalEntries: totalEntries });
+    });
+  });
+  eReq.on('error', function(e){ cb(e.message); });
+  eReq.setTimeout(30000, function(){ eReq.destroy(); cb('Timeout'); });
+  eReq.write(xml); eReq.end();
+}
+
+async function runEbayEnrich(subscriberCode){
+  if(ebayEnrichRunning[subscriberCode]) return;
+  ebayEnrichRunning[subscriberCode] = true;
+  ebayEnrichStatus[subscriberCode] = {
+    running: true, startedAt: new Date().toISOString(),
+    page: 0, totalPages: null, matched: 0, noSku: 0, unmatched: 0
+  };
+  console.log('[ebay-enrich] Starting for', subscriberCode);
+
+  try {
+    var sub = await new Promise(function(resolve){ getSubscriber(subscriberCode, function(err, s){ resolve(s); }); });
+    if(!sub){ ebayEnrichStatus[subscriberCode] = { running: false, error: 'Subscriber not found' }; ebayEnrichRunning[subscriberCode] = false; return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    if(!token){ ebayEnrichStatus[subscriberCode] = { running: false, error: 'No eBay token configured' }; ebayEnrichRunning[subscriberCode] = false; return; }
+
+    var database = await new Promise(function(resolve){ connectMongo(function(err, d){ resolve(d); }); });
+    if(!database){ ebayEnrichStatus[subscriberCode] = { running: false, error: 'DB unavailable' }; ebayEnrichRunning[subscriberCode] = false; return; }
+
+    var entriesPerPage = 200;
+    var page = 1;
+    var totalPages = null;
+    var matched = 0, noSku = 0, unmatched = 0;
+
+    while(true){
+      // Fetch page
+      var pageData = await new Promise(function(resolve, reject){
+        fetchEbayActiveListingsPage(token, page, entriesPerPage, function(err, d){
+          if(err) reject(new Error(err));
+          else resolve(d);
+        });
+      });
+
+      if(totalPages === null){ totalPages = pageData.totalPages; }
+      ebayEnrichStatus[subscriberCode].page = page;
+      ebayEnrichStatus[subscriberCode].totalPages = totalPages;
+
+      // Process each item
+      for(var i=0; i<pageData.items.length; i++){
+        var it = pageData.items[i];
+        if(!it.sku){ noSku++; continue; }
+        var result = await database.collection('warehouse_inventory').updateOne(
+          { code: subscriberCode, sku: it.sku },
+          { $set: { ebayItemId: it.itemId, ebayEnrichedAt: new Date() } }
+        );
+        if(result.matchedCount > 0){ matched++; } else { unmatched++; }
+      }
+
+      ebayEnrichStatus[subscriberCode].matched = matched;
+      ebayEnrichStatus[subscriberCode].noSku = noSku;
+      ebayEnrichStatus[subscriberCode].unmatched = unmatched;
+
+      // Throttle between pages (eBay ~5k calls/day limit, pace safely)
+      await sleep(1200);
+
+      if(page >= totalPages) break;
+      page++;
+    }
+
+    ebayEnrichStatus[subscriberCode] = Object.assign({}, ebayEnrichStatus[subscriberCode], {
+      running: false,
+      completedAt: new Date().toISOString()
+    });
+    console.log('[ebay-enrich] Done: matched=' + matched + ' noSku=' + noSku + ' unmatched=' + unmatched);
+  } catch(e){
+    console.log('[ebay-enrich] Error:', e.message);
+    ebayEnrichStatus[subscriberCode] = Object.assign({}, ebayEnrichStatus[subscriberCode] || {}, {
+      running: false, error: e.message
+    });
+  } finally {
+    ebayEnrichRunning[subscriberCode] = false;
+  }
+}
+
 // ===================== MAIN SERVER =====================
 var server = http.createServer(function(req, res) {
   addSecurityHeaders(res);
@@ -4336,6 +4471,38 @@ var server = http.createServer(function(req, res) {
   // - Upserts by SKU. Existing SKUs updated, new SKUs inserted.
 
   // POST /my/import/csv  body: { code, csvText }
+  // ───────────────────────────────────────────────────────────
+  // EBAY ITEM ID ENRICH — one-time background process
+  // Pulls active eBay listings via GetMyeBaySelling, matches by SKU,
+  // stores ebayItemId on each warehouse_inventory record.
+  // ───────────────────────────────────────────────────────────
+  if (pathname === '/my/ebay/enrich/run' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var iCode = (data.code || '').toUpperCase();
+      var iSess = getRequestSession(req, parsed);
+      if(!iSess || iSess.role !== 'admin' || iSess.subscriberCode !== iCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      if(ebayEnrichRunning[iCode]){
+        res.writeHead(200); res.end(JSON.stringify({ success: false, message: 'Enrich already running.' })); return;
+      }
+      try { runEbayEnrich(iCode); } catch(e){}
+      res.writeHead(200); res.end(JSON.stringify({ success: true, message: 'Enrich started. Check status for progress.' }));
+    });
+    return;
+  }
+
+  if (pathname === '/my/ebay/enrich/status' && req.method === 'GET') {
+    var sCode = (parsed.query.code || '').toUpperCase();
+    var sSess = getRequestSession(req, parsed);
+    if(!sSess || sSess.role !== 'admin' || sSess.subscriberCode !== sCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var st = ebayEnrichStatus[sCode] || { running: false };
+    res.writeHead(200); res.end(JSON.stringify(st));
+    return;
+  }
+
   if (pathname === '/my/import/csv' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var iCode = (data.code || '').toUpperCase();
