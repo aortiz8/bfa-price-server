@@ -1053,10 +1053,10 @@ function reviseEbayListingPrice(subscriberCode, itemId, newPrice, cb){
 }
 
 // Log a repricing event to MongoDB
-function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, reason, dryRun, skipped, cycleId){
+function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, reason, dryRun, skipped, cycleId, diagnostics){
   connectMongo(function(err, database){
     if(err || !database) return;
-    database.collection('reprice_history').insertOne({
+    var record = {
       subscriberCode: subscriberCode,
       sku: sku,
       platform: platform,
@@ -1067,7 +1067,9 @@ function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, re
       skipped: !!skipped,
       cycleId: cycleId || '',
       createdAt: new Date()
-    }).catch(function(){});
+    };
+    if(diagnostics) record.diagnostics = diagnostics;
+    database.collection('reprice_history').insertOne(record).catch(function(){});
   });
 }
 
@@ -1158,15 +1160,47 @@ async function runRepricerCycle(subscriberCode, singleSku){
           return allowedConds.some(function(c){ return c.toLowerCase() === (o.condition||'').toLowerCase(); });
         });
 
+        // Build diagnostics payload for single-SKU test mode
+        var diag = null;
+        if(singleSku){
+          // Get all competing offers after full filter chain (condition + seller + fulfillment)
+          var postFilter = filteredOffers.filter(function(o){ return o.sellerId !== sellerId; });
+          if(config.fulfillmentFilter === 'fbm-only'){
+            postFilter = postFilter.filter(function(o){ return o.fulfillment === 'FBM'; });
+          }
+          postFilter.sort(function(a,b){ return a.price - b.price; });
+          diag = {
+            myAsin: listing.asin,
+            mySellerId: sellerId,
+            myCondition: listing.condition,
+            myPrice: listing.price,
+            configMatch: config.conditionMatch,
+            configFulfillment: config.fulfillmentFilter,
+            configUndercut: config.undercutStrategy,
+            configMaxDropPct: config.maxDropPct,
+            configMaxIncreasePct: config.maxIncreasePct,
+            allowedConds: allowedConds,
+            totalOffers: offers.length,
+            offersAll: offers.slice(0, 30).map(function(o){
+              return { price: o.price, condition: o.condition, fulfillment: o.fulfillment, sellerId: o.sellerId, isMe: o.sellerId === sellerId };
+            }),
+            afterConditionFilter: filteredOffers.length,
+            afterAllFilters: postFilter.length,
+            competingAfterFilters: postFilter.slice(0, 10).map(function(o){
+              return { price: o.price, condition: o.condition, fulfillment: o.fulfillment, sellerId: o.sellerId };
+            })
+          };
+        }
+
         if(!filteredOffers.length){
-          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No matching-condition offers', config.dryRun, true, cycleId);
+          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No matching-condition offers', config.dryRun, true, cycleId, diag);
           skipped++;
           continue;
         }
 
         var result = calcTargetFromOffers(filteredOffers, sellerId, config);
         if(!result){
-          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No competing offers', config.dryRun, true, cycleId);
+          logRepriceHistory(subscriberCode, sku, 'amazon', listing.price || 0, listing.price || 0, 'No competing offers', config.dryRun, true, cycleId, diag);
           skipped++;
           continue;
         }
@@ -1174,7 +1208,7 @@ async function runRepricerCycle(subscriberCode, singleSku){
         var currentPrice = parseFloat(listing.price) || 0;
         var guards = applyGuards(currentPrice, result.targetPrice, config);
         if(guards.skipped){
-          logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, currentPrice, result.reason + ' · ' + guards.reason, config.dryRun, true, cycleId);
+          logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, currentPrice, result.reason + ' · ' + guards.reason, config.dryRun, true, cycleId, diag);
           skipped++;
           continue;
         }
@@ -1194,7 +1228,7 @@ async function runRepricerCycle(subscriberCode, singleSku){
             { $set: { price: finalAmazonPrice, lastRepriced: new Date() } }
           );
         }
-        logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, finalAmazonPrice, result.reason, config.dryRun, false, cycleId);
+        logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, finalAmazonPrice, result.reason, config.dryRun, false, cycleId, diag);
 
         // eBay mirror price — Amazon price × (1 - ebayDiscountPct/100)
         var ebayPrice = Math.round(finalAmazonPrice * (1 - (config.ebayDiscountPct || 0) / 100) * 100) / 100;
@@ -1759,13 +1793,60 @@ async function runSyncCycle(subscriberCode){
     var amazonSince = new Date(Math.min(Date.now() - 60*1000, lastAmazon.getTime())).toISOString();
     var ebaySince = new Date(lastEbay.getTime()).toISOString();
 
-    // ── AMAZON SIDE — uses shared cache ──
+    // ── AMAZON SIDE — targeted fresh fetch (does NOT use shared cache)
+    // The shared cache can be up to 15min stale, which means sync would miss
+    // new sales until cache refreshes. We do our own small, targeted fetch
+    // with CreatedAfter = lastCheckedTime for the fastest response.
     var amazonFetchErr = null;
     var amazonAllOrders = await new Promise(function(resolve){
-      getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders, info){
-        if(err) amazonFetchErr = err;
-        if(info && info.stale && info.error) amazonFetchErr = info.error;
-        resolve(err ? [] : (orders || []));
+      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+      getAmazonAccessToken(function(tokenErr, accessToken){
+        if(tokenErr){
+          amazonFetchErr = 'auth: ' + tokenErr;
+          // Try shared cache fallback
+          getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders){
+            resolve(err ? [] : (orders || []));
+          });
+          return;
+        }
+        var qp = 'MarketplaceIds=' + marketplaceId + '&CreatedAfter=' + encodeURIComponent(amazonSince);
+        var allPages = [];
+        function fetchNext(nextToken){
+          var path = '/orders/v0/orders?' + qp + (nextToken ? '&NextToken=' + encodeURIComponent(nextToken) : '');
+          var opts = {
+            hostname: 'sellingpartnerapi-na.amazon.com',
+            path: path, method: 'GET',
+            headers: { 'x-amz-access-token': accessToken }
+          };
+          var aReq = https.request(opts, function(r){
+            var data = '';
+            r.on('data', function(c){ data += c; });
+            r.on('end', function(){
+              try {
+                var json = JSON.parse(data);
+                if(json.errors && json.errors[0]){
+                  amazonFetchErr = json.errors[0].message || json.errors[0].code;
+                  // Try shared cache fallback on error
+                  getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders){
+                    resolve(err ? [] : (orders || []));
+                  });
+                  return;
+                }
+                var payload = json.payload || {};
+                allPages = allPages.concat(payload.Orders || []);
+                if(payload.NextToken){ fetchNext(payload.NextToken); return; }
+                resolve(allPages);
+              } catch(e){
+                amazonFetchErr = 'parse error';
+                resolve([]);
+              }
+            });
+          });
+          aReq.on('error', function(e){ amazonFetchErr = e.message; resolve([]); });
+          aReq.setTimeout(20000, function(){ aReq.destroy(); amazonFetchErr = 'timeout'; resolve([]); });
+          aReq.end();
+        }
+        fetchNext(null);
       });
     });
     // Filter to MFN only (sync only processes orders Amazon doesn't ship for us)
@@ -2661,22 +2742,24 @@ var server = http.createServer(function(req, res) {
     var specificDate = parsed.query.date || null;
 
     // Cache tier by period — balance freshness vs SP-API quota
-    // Unified 15-min cache for all periods — protects Amazon SP-API quota.
-    // Covers: today, week, month, lastmonth-to-date, specificDate.
+    // Today needs frequent refresh (new sales arriving), historical can cache long.
     var CACHE_TTL_MS = {
-      'today': 15 * 60 * 1000,       // 15min
-      'week':  15 * 60 * 1000,       // 15min
+      'today': 2 * 60 * 1000,        // 2min — today's sales change frequently
+      'week':  10 * 60 * 1000,       // 10min
       'month': 15 * 60 * 1000,       // 15min
-      'lastmonth-to-date': 30 * 60 * 1000, // 30min (historical, doesn't change)
-      'date':  60 * 60 * 1000        // 1hr (historical specific date)
+      'lastmonth-to-date': 30 * 60 * 1000, // 30min (historical, doesn't change much)
+      'date':  60 * 60 * 1000        // 1hr (fully historical)
     };
     var cacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
     var ttl = specificDate ? CACHE_TTL_MS.date : (CACHE_TTL_MS[period] || 15 * 60 * 1000);
 
+    // Bypass cache when ?bypass=1 (used by refresh button)
+    var bypassSalesCache = parsed.query.bypass === '1';
+
     if(!global._amzSalesCache) global._amzSalesCache = {};
     var cached = global._amzSalesCache[cacheKey];
     var nowMs = Date.now();
-    if(cached && (nowMs - cached.ts) < ttl){
+    if(cached && !bypassSalesCache && (nowMs - cached.ts) < ttl){
       // Fresh cache hit
       res.writeHead(200); res.end(JSON.stringify(cached.data)); return;
     }
@@ -2871,20 +2954,21 @@ var server = http.createServer(function(req, res) {
     var offsetMinutes = parseInt(parsed.query.offset || '0');
     var specificDate = parsed.query.date || null; // YYYY-MM-DD for specific date
 
-    // Unified 15-min server cache (matches Amazon sales cache)
+    // Cache tier — today refreshes frequently, historical caches longer
     var EBAY_CACHE_TTL_MS = {
-      'today': 15 * 60 * 1000,
-      'week':  15 * 60 * 1000,
-      'month': 15 * 60 * 1000,
+      'today': 2 * 60 * 1000,        // 2min
+      'week':  10 * 60 * 1000,       // 10min
+      'month': 15 * 60 * 1000,       // 15min
       'lastmonth-to-date': 30 * 60 * 1000,
       'date':  60 * 60 * 1000
     };
     var ebayCacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
     var ebayTtl = specificDate ? EBAY_CACHE_TTL_MS.date : (EBAY_CACHE_TTL_MS[period] || 15 * 60 * 1000);
+    var bypassEbaySalesCache = parsed.query.bypass === '1';
     if(!global._ebaySalesCache) global._ebaySalesCache = {};
     var ebayCached = global._ebaySalesCache[ebayCacheKey];
     var ebayNowMs = Date.now();
-    if(ebayCached && (ebayNowMs - ebayCached.ts) < ebayTtl){
+    if(ebayCached && !bypassEbaySalesCache && (ebayNowMs - ebayCached.ts) < ebayTtl){
       res.writeHead(200); res.end(JSON.stringify(ebayCached.data)); return;
     }
     function serveEbayStaleOrFresh(body, isError){
@@ -5583,7 +5667,8 @@ var server = http.createServer(function(req, res) {
                 reason: h.reason,
                 dryRun: !!h.dryRun,
                 skipped: !!h.skipped,
-                createdAt: h.createdAt
+                createdAt: h.createdAt,
+                diagnostics: h.diagnostics || null
               };
             })
           }));
