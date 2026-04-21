@@ -1731,6 +1731,150 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Timeclock: Clear punches ──
+  // ── Timeclock: Get all punches for an employee + date (admin view) ──
+  // GET /tc/day-punches?code=X&name=Y&date=YYYY-MM-DD
+  if (pathname === '/tc/day-punches' && req.method === 'GET') {
+    var dpCode = (parsed.query.code || '').toUpperCase();
+    var dpSess = getRequestSession(req, parsed);
+    if(!dpSess || dpSess.role !== 'admin' || dpSess.subscriberCode !== dpCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var dpName = parsed.query.name || '';
+    var dpDate = parsed.query.date || '';
+    if(!dpCode || !dpName || !dpDate){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code/name/date' })); return; }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ punches: [] })); return; }
+      database.collection('timeclock').find({
+        subscriberCode: dpCode,
+        employeeName: dpName,
+        localDate: dpDate
+      }).sort({ createdAt: 1 }).toArray()
+        .then(function(rows){
+          res.writeHead(200); res.end(JSON.stringify({
+            punches: (rows || []).map(function(p){
+              return {
+                id: p._id.toString(),
+                type: p.type,
+                localDate: p.localDate,
+                localTime: p.localTime,
+                createdAt: p.createdAt
+              };
+            })
+          }));
+        })
+        .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ punches: [], error: e.message })); });
+    });
+    return;
+  }
+
+  // ── Timeclock: Edit a single punch (admin) ──
+  // POST /tc/punch-edit  body: { code, id, localTime, type, localDate }
+  if (pathname === '/tc/punch-edit' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var peCode = (data.code || '').toUpperCase();
+      var peSess = getRequestSession(req, parsed);
+      if(!peSess || peSess.role !== 'admin' || peSess.subscriberCode !== peCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var peId = data.id;
+      if(!peId){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing id' })); return; }
+      var update = {};
+      if(typeof data.localTime === 'string') update.localTime = data.localTime;
+      if(data.type === 'in' || data.type === 'out') update.type = data.type;
+      if(typeof data.localDate === 'string' && data.localDate) update.localDate = data.localDate;
+      if(!Object.keys(update).length){ res.writeHead(400); res.end(JSON.stringify({ error: 'Nothing to update' })); return; }
+      update.editedBy = peSess.employeeName || 'Admin';
+      update.editedAt = new Date().toISOString();
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var ObjectId;
+        try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(500); res.end(JSON.stringify({ error: 'Server config error' })); return; }
+        var oid;
+        try { oid = new ObjectId(peId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid id' })); return; }
+        database.collection('timeclock').updateOne(
+          { _id: oid, subscriberCode: peCode },
+          { $set: update }
+        )
+          .then(function(r){
+            if(r.matchedCount === 0){ res.writeHead(404); res.end(JSON.stringify({ error: 'Punch not found' })); return; }
+            res.writeHead(200); res.end(JSON.stringify({ success: true }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Delete a single punch (admin) ──
+  // POST /tc/punch-delete  body: { code, id }
+  if (pathname === '/tc/punch-delete' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var pdCode = (data.code || '').toUpperCase();
+      var pdSess = getRequestSession(req, parsed);
+      if(!pdSess || pdSess.role !== 'admin' || pdSess.subscriberCode !== pdCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var pdId = data.id;
+      if(!pdId){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing id' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var ObjectId;
+        try { ObjectId = require('mongodb').ObjectId; } catch(e){ res.writeHead(500); res.end(JSON.stringify({ error: 'Server config error' })); return; }
+        var oid;
+        try { oid = new ObjectId(pdId); } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid id' })); return; }
+        database.collection('timeclock').deleteOne({ _id: oid, subscriberCode: pdCode })
+          .then(function(r){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, deleted: r.deletedCount }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // ── Timeclock: Add a manual punch (admin, for forgotten in/out) ──
+  // POST /tc/punch-add  body: { code, name, type, localDate, localTime }
+  if (pathname === '/tc/punch-add' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var paCode = (data.code || '').toUpperCase();
+      var paSess = getRequestSession(req, parsed);
+      if(!paSess || paSess.role !== 'admin' || paSess.subscriberCode !== paCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var paName = data.name || '';
+      var paType = data.type;
+      var paDate = data.localDate || '';
+      var paTime = data.localTime || '';
+      if(!paCode || !paName || !paDate || !paTime){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing required fields' })); return; }
+      if(paType !== 'in' && paType !== 'out'){ res.writeHead(400); res.end(JSON.stringify({ error: 'Type must be in or out' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        // Build createdAt from localDate + localTime so the punch slots correctly in time-order sort
+        var fakeIso;
+        try { fakeIso = new Date(paDate + 'T' + paTime + ':00').toISOString(); }
+        catch(e){ fakeIso = new Date().toISOString(); }
+        var entry = {
+          subscriberCode: paCode,
+          employeeName: paName,
+          employeePin: data.pin || '',
+          type: paType,
+          localDate: paDate,
+          localTime: paTime,
+          createdAt: fakeIso,
+          offsetMinutes: typeof data.offsetMinutes === 'number' ? data.offsetMinutes : 0,
+          manuallyAddedBy: paSess.employeeName || 'Admin',
+          manuallyAddedAt: new Date().toISOString()
+        };
+        database.collection('timeclock').insertOne(entry)
+          .then(function(r){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, id: r.insertedId.toString() }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
   if (pathname === '/tc/clear' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
     var sessTcClr = getRequestSession(req, parsed);
