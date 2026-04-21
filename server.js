@@ -4731,7 +4731,8 @@ var server = http.createServer(function(req, res) {
           }).toArray(),
           database.collection('warehouse_inventory').find({
             code: code,
-            createdAt: { $gte: utcStartDate, $lt: utcEndDate }
+            createdAt: { $gte: utcStartDate, $lt: utcEndDate },
+            source: { $ne: 'csv-import' }
           }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
