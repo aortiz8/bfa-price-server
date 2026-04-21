@@ -1966,7 +1966,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 4 * 60 * 1000); // every 4 min — testing if we can beat the old program to cross-platform sync
+  }, 3 * 60 * 1000); // every 3 min — Round 2: testing if we can beat the old program to cross-platform sync
   console.log('[sync] Scheduler started');
 }
 
@@ -2264,28 +2264,61 @@ var server = http.createServer(function(req, res) {
           snoozedPromise.then(function(snoozed){
             var snoozedIds = (snoozed || []).map(function(s){ return s.orderId; });
 
-            // Use SHARED Amazon orders cache (one API call serves sync + picklist + sales)
-            getRecentAmazonOrdersShared(aCode, sub, function(sharedErr, sharedOrders, info){
-              // If shared cache had any error, serve the pick list's own stale cache if available
-              if((sharedErr || (info && info.error))){
-                var serverErr = sharedErr || (info && info.error) || 'shared cache error';
-                serveStaleOrError(serverErr, { error: serverErr, pending: [] });
+            // Pick list needs CURRENT status — shared cache has stale statuses.
+            // Do a targeted fetch with OrderStatuses=Unshipped,PartiallyShipped.
+            // This is a small, fast query (usually <20 orders for active sellers).
+            getAmazonAccessToken(function(plTokenErr, plAccessToken){
+              if(plTokenErr){
+                serveStaleOrError('Amazon auth: ' + plTokenErr, { error: 'Amazon auth: ' + plTokenErr, pending: [] });
                 return;
               }
-              // Filter: MFN only, Unshipped/PartiallyShipped, not snoozed
-              var allOrders = (sharedOrders || []).filter(function(o){
-                if(o.FulfillmentChannel !== 'MFN') return false;
-                if(snoozedIds.indexOf(o.AmazonOrderId) !== -1) return false;
-                var s = (o.OrderStatus || '');
-                return s === 'Unshipped' || s === 'PartiallyShipped';
-              });
-
-              if(!allOrders.length){
-                var emptyBody = { pending: [], canceled: [], actionNeeded: [] };
-                global._amzPicklistCache[aCode] = { ts: Date.now(), data: emptyBody };
-                res.writeHead(200); res.end(JSON.stringify(emptyBody)); return;
+              var thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+              var pickAllOrders = [];
+              function fetchPickPage(nextToken){
+                var qp = 'MarketplaceIds=' + marketplaceId
+                       + '&CreatedAfter=' + encodeURIComponent(thirtyDaysAgo)
+                       + '&OrderStatuses=Unshipped,PartiallyShipped';
+                if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
+                var opts = {
+                  hostname: 'sellingpartnerapi-na.amazon.com',
+                  path: '/orders/v0/orders?' + qp,
+                  method: 'GET',
+                  headers: { 'x-amz-access-token': plAccessToken }
+                };
+                var aReq = https.request(opts, function(r){
+                  var data = '';
+                  r.on('data', function(c){ data += c; });
+                  r.on('end', function(){
+                    try {
+                      var json = JSON.parse(data);
+                      if(json.errors && json.errors[0]){
+                        var errMsg = json.errors[0].message || json.errors[0].code;
+                        serveStaleOrError(errMsg, { error: errMsg, pending: [] });
+                        return;
+                      }
+                      var payload = json.payload || {};
+                      var pageOrders = (payload.Orders || []).filter(function(o){
+                        if(o.FulfillmentChannel !== 'MFN') return false;
+                        if(snoozedIds.indexOf(o.AmazonOrderId) !== -1) return false;
+                        return true;
+                      });
+                      pickAllOrders = pickAllOrders.concat(pageOrders);
+                      if(payload.NextToken){ fetchPickPage(payload.NextToken); return; }
+                      // Done — enrich and respond
+                      if(!pickAllOrders.length){
+                        var emptyBody = { pending: [], canceled: [], actionNeeded: [] };
+                        global._amzPicklistCache[aCode] = { ts: Date.now(), data: emptyBody };
+                        res.writeHead(200); res.end(JSON.stringify(emptyBody)); return;
+                      }
+                      enrichAndRespond(pickAllOrders, plAccessToken, database);
+                    } catch(e){ serveStaleOrError('Parse error', { error: 'Parse error', pending: [] }); }
+                  });
+                });
+                aReq.on('error', function(e){ serveStaleOrError(e.message, { error: e.message, pending: [] }); });
+                aReq.setTimeout(20000, function(){ aReq.destroy(); serveStaleOrError('Timeout', { error: 'Timeout', pending: [] }); });
+                aReq.end();
               }
-              enrichAndRespond(allOrders, accessToken, database);
+              fetchPickPage(null);
             });
 
             function enrichAndRespond(allOrders, accessToken, database){
@@ -2296,7 +2329,11 @@ var server = http.createServer(function(req, res) {
                 ? database.collection('amazon_order_items_cache').find({ orderId: { $in: orderIds } }).toArray()
                 : Promise.resolve([]);
               cacheFetch.then(function(rows){
-                (rows || []).forEach(function(r){ cachedById[r.orderId] = r; });
+                (rows || []).forEach(function(r){
+                  // Only use cache if it has allItems (new format).
+                  // Old entries without allItems need to be refetched to support multi-item display.
+                  if(r.allItems) cachedById[r.orderId] = r;
+                });
                 // Determine which need live fetch
                 var toFetch = allOrders.filter(function(o){ return !cachedById[o.AmazonOrderId]; });
                 // Fetch with 2 concurrent at a time (rate limit friendly)
@@ -2346,12 +2383,21 @@ var server = http.createServer(function(req, res) {
                       condition: cached.condition || '',
                       cancelState: 'NONE_REQUESTED',
                       itemCount: itemCount,
+                      allItems: cached.allItems || [],
                       shippingCategory: o.ShipmentServiceLevelCategory || '',  // 'Expedited', 'Standard', 'NextDay', etc.
                       location: null
                     };
                   });
                   // Enrich with warehouse location from warehouse_inventory
-                  var skusForLookup = pending.map(function(o){ return o.sku; }).filter(Boolean);
+                  // Collect ALL SKUs including from multi-item orders
+                  var allSkusSet = {};
+                  pending.forEach(function(o){
+                    if(o.sku) allSkusSet[o.sku] = true;
+                    (o.allItems || []).forEach(function(it){
+                      if(it.sku) allSkusSet[it.sku] = true;
+                    });
+                  });
+                  var skusForLookup = Object.keys(allSkusSet);
                   if(skusForLookup.length && database){
                     database.collection('warehouse_inventory')
                       .find({ code: aCode, sku: { $in: skusForLookup } })
@@ -2360,7 +2406,13 @@ var server = http.createServer(function(req, res) {
                       .then(function(rows){
                         var locMap = {};
                         (rows || []).forEach(function(r){ if(r.sku) locMap[r.sku] = r.location || null; });
-                        pending.forEach(function(o){ o.location = locMap[o.sku] || null; });
+                        pending.forEach(function(o){
+                          o.location = locMap[o.sku] || null;
+                          // Also enrich each item in allItems with its location
+                          (o.allItems || []).forEach(function(it){
+                            it.location = locMap[it.sku] || null;
+                          });
+                        });
                         var responseBody = { pending: pending, canceled: [], actionNeeded: [] };
                         global._amzPicklistCache[aCode] = { ts: Date.now(), data: responseBody };
                         res.writeHead(200); res.end(JSON.stringify(responseBody));
@@ -2394,17 +2446,26 @@ var server = http.createServer(function(req, res) {
                   try {
                     var json = JSON.parse(data);
                     var items = ((json.payload || {}).OrderItems) || [];
-                    var item = items[0] || {};
+                    var first = items[0] || {};
                     cb({
-                      sku: item.SellerSKU || '',
-                      title: item.Title || '',
-                      condition: item.ConditionId || ''
+                      sku: first.SellerSKU || '',
+                      title: first.Title || '',
+                      condition: first.ConditionId || '',
+                      // All items in the order for multi-item picks
+                      allItems: items.map(function(it){
+                        return {
+                          sku: it.SellerSKU || '',
+                          title: it.Title || '',
+                          condition: it.ConditionId || '',
+                          quantity: it.QuantityOrdered || 1
+                        };
+                      })
                     });
-                  } catch(e){ cb({ sku: '', title: '', condition: '' }); }
+                  } catch(e){ cb({ sku: '', title: '', condition: '', allItems: [] }); }
                 });
               });
-              iReq.on('error', function(){ cb({ sku: '', title: '', condition: '' }); });
-              iReq.setTimeout(10000, function(){ iReq.destroy(); cb({ sku: '', title: '', condition: '' }); });
+              iReq.on('error', function(){ cb({ sku: '', title: '', condition: '', allItems: [] }); });
+              iReq.setTimeout(10000, function(){ iReq.destroy(); cb({ sku: '', title: '', condition: '', allItems: [] }); });
               iReq.end();
             }
 
