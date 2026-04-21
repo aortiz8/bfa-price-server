@@ -1440,25 +1440,44 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
 // TTL: 15 min — aligned with pick list / sales cache.
 // ─────────────────────────────────────────────────────────────
 var SHARED_AMZ_ORDERS_TTL = 15 * 60 * 1000;
-var SHARED_AMZ_ORDERS_LOOKBACK_DAYS = 30;
+var SHARED_AMZ_ORDERS_LOOKBACK_DAYS = 7;
 
 function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
   if(!global._sharedAmzOrders) global._sharedAmzOrders = {};
+  if(!global._sharedAmzOrdersInFlight) global._sharedAmzOrdersInFlight = {};
   var cacheEntry = global._sharedAmzOrders[subscriberCode];
   var nowMs = Date.now();
   if(cacheEntry && (nowMs - cacheEntry.ts) < SHARED_AMZ_ORDERS_TTL){
     cb(null, cacheEntry.orders, { cached: true, ts: cacheEntry.ts });
     return;
   }
+
+  // In-flight dedup: if another request is already fetching, queue this callback
+  var inFlight = global._sharedAmzOrdersInFlight[subscriberCode];
+  if(inFlight){
+    inFlight.callbacks.push(cb);
+    return;
+  }
+  global._sharedAmzOrdersInFlight[subscriberCode] = { callbacks: [cb] };
+
+  function resolveAll(err, orders, info){
+    var queue = global._sharedAmzOrdersInFlight[subscriberCode];
+    delete global._sharedAmzOrdersInFlight[subscriberCode];
+    if(queue && queue.callbacks){
+      queue.callbacks.forEach(function(c){
+        try { c(err, orders, info); } catch(e){}
+      });
+    }
+  }
+
   // Cache miss — fetch fresh
   var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
   var sinceIso = new Date(Date.now() - SHARED_AMZ_ORDERS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
 
   getAmazonAccessToken(function(tokenErr, accessToken){
     if(tokenErr){
-      // Serve stale if we have any
-      if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'auth: ' + tokenErr }); return; }
-      cb(tokenErr, []);
+      if(cacheEntry){ resolveAll(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'auth: ' + tokenErr }); return; }
+      resolveAll(tokenErr, [], null);
       return;
     }
     // Paginated fetch — NextToken support
@@ -1480,9 +1499,8 @@ function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
             var json = JSON.parse(data);
             if(json.errors && json.errors[0]){
               var errMsg = json.errors[0].message || json.errors[0].code;
-              // Serve stale on quota or any error
-              if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: errMsg }); return; }
-              cb(errMsg, []);
+              if(cacheEntry){ resolveAll(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: errMsg }); return; }
+              resolveAll(errMsg, [], null);
               return;
             }
             var payload = json.payload || {};
@@ -1491,21 +1509,21 @@ function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
             if(payload.NextToken){ fetchPage(payload.NextToken); return; }
             // Done. Save to cache.
             global._sharedAmzOrders[subscriberCode] = { ts: Date.now(), orders: allOrders };
-            cb(null, allOrders, { cached: false, fresh: true });
+            resolveAll(null, allOrders, { cached: false, fresh: true });
           } catch(e){
-            if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'parse' }); return; }
-            cb('Parse error', []);
+            if(cacheEntry){ resolveAll(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'parse' }); return; }
+            resolveAll('Parse error', [], null);
           }
         });
       });
       aReq.on('error', function(e){
-        if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: e.message }); return; }
-        cb(e.message, []);
+        if(cacheEntry){ resolveAll(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: e.message }); return; }
+        resolveAll(e.message, [], null);
       });
       aReq.setTimeout(20000, function(){
         aReq.destroy();
-        if(cacheEntry){ cb(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'timeout' }); return; }
-        cb('Timeout', []);
+        if(cacheEntry){ resolveAll(null, cacheEntry.orders, { stale: true, ts: cacheEntry.ts, error: 'timeout' }); return; }
+        resolveAll('Timeout', [], null);
       });
       aReq.end();
     }
@@ -2207,8 +2225,10 @@ var server = http.createServer(function(req, res) {
 
             // Use SHARED Amazon orders cache (one API call serves sync + picklist + sales)
             getRecentAmazonOrdersShared(aCode, sub, function(sharedErr, sharedOrders, info){
-              if(sharedErr && (!sharedOrders || !sharedOrders.length)){
-                serveStaleOrError(sharedErr, { error: sharedErr, pending: [] });
+              // If shared cache had any error, serve the pick list's own stale cache if available
+              if((sharedErr || (info && info.error))){
+                var serverErr = sharedErr || (info && info.error) || 'shared cache error';
+                serveStaleOrError(serverErr, { error: serverErr, pending: [] });
                 return;
               }
               // Filter: MFN only, Unshipped/PartiallyShipped, not snoozed
@@ -2587,102 +2607,6 @@ var server = http.createServer(function(req, res) {
         endDate = null;
       }
 
-      // ── SHARED CACHE SHORT-CIRCUIT ──
-      // If the requested window falls within the 30-day shared cache, serve from there.
-      // This avoids hitting Amazon's quota with duplicate queries.
-      var sharedCacheWindow = Date.now() - (SHARED_AMZ_ORDERS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-      var canUseShared = startDate.getTime() >= sharedCacheWindow;
-
-      if(canUseShared){
-        getRecentAmazonOrdersShared(code, sub, function(sharedErr, sharedOrders, info){
-          if(sharedErr && (!sharedOrders || !sharedOrders.length)){
-            // No cache, no orders — fall back to direct fetch path below
-            directFetchPath();
-            return;
-          }
-          // Filter to requested window
-          var startIso = startDate.toISOString();
-          var endIso = endDate ? endDate.toISOString() : null;
-          var inWindow = (sharedOrders || []).filter(function(o){
-            if(!o.PurchaseDate) return false;
-            if(o.PurchaseDate < startIso) return false;
-            if(endIso && o.PurchaseDate >= endIso) return false;
-            // Only count non-canceled, non-pending orders with a total
-            if(o.OrderStatus === 'Canceled' || o.OrderStatus === 'Pending') return false;
-            if(!o.OrderTotal) return false;
-            return true;
-          });
-          var totalRevenue = inWindow.reduce(function(sum, o){
-            var amt = o.OrderTotal && parseFloat(o.OrderTotal.Amount);
-            return sum + (isNaN(amt) ? 0 : amt);
-          }, 0);
-          var simplified = inWindow.map(function(o){
-            return {
-              orderId: o.AmazonOrderId,
-              date: o.PurchaseDate,
-              title: '',
-              sku: '',
-              price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
-              paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
-              status: o.OrderStatus,
-              buyer: ''
-            };
-          });
-          // Enrich with titles for date-specific or today queries (small result sets)
-          function respondSharedResult(){
-            var result = {
-              count: inWindow.length,
-              totalRevenue: Math.round(totalRevenue * 100) / 100,
-              orders: simplified
-            };
-            if(info && info.stale) result.stale = true;
-            global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
-            res.writeHead(200); res.end(JSON.stringify(result));
-          }
-          if((specificDate || period === 'today') && simplified.length && simplified.length <= 30){
-            getAmazonAccessToken(function(tokenErr, accessToken){
-              if(tokenErr || !accessToken){ respondSharedResult(); return; }
-              var idx = 0;
-              function enrichNext(){
-                if(idx >= simplified.length){ respondSharedResult(); return; }
-                var o = simplified[idx];
-                var iOpts = {
-                  hostname: 'sellingpartnerapi-na.amazon.com',
-                  path: '/orders/v0/orders/' + encodeURIComponent(o.orderId) + '/orderItems',
-                  method: 'GET',
-                  headers: { 'x-amz-access-token': accessToken }
-                };
-                var iReq = https.request(iOpts, function(r2){
-                  var d2 = '';
-                  r2.on('data', function(c){ d2 += c; });
-                  r2.on('end', function(){
-                    try {
-                      var j2 = JSON.parse(d2);
-                      var items = ((j2.payload || {}).OrderItems) || [];
-                      if(items[0]){
-                        o.title = items[0].Title || '';
-                        o.sku = items[0].SellerSKU || '';
-                      }
-                    } catch(e){}
-                    idx++;
-                    setTimeout(enrichNext, 250);
-                  });
-                });
-                iReq.on('error', function(){ idx++; setTimeout(enrichNext, 250); });
-                iReq.setTimeout(8000, function(){ iReq.destroy(); idx++; setTimeout(enrichNext, 250); });
-                iReq.end();
-              }
-              enrichNext();
-            });
-          } else {
-            respondSharedResult();
-          }
-        });
-        return;
-      }
-
-      // ── DIRECT FETCH PATH (for historical date ranges beyond 30 days) ──
-      function directFetchPath(){
       getAmazonAccessToken(function(tokenErr, accessToken){
         if(tokenErr){ res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth: ' + tokenErr, orders: [] })); return; }
         // SP-API Orders: /orders/v0/orders
@@ -2829,8 +2753,6 @@ var server = http.createServer(function(req, res) {
         }
         fetchOrders(null, 1);
       });
-      } // end directFetchPath
-      directFetchPath();
     });
     return;
   }
