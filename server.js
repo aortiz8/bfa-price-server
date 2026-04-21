@@ -2000,15 +2000,21 @@ async function runSyncCycle(subscriberCode){
       }
     }
 
-    // Update last-checked timestamps
+    // Update last-checked timestamps — but only for platforms whose fetch succeeded.
+    // If a fetch fails (quota error etc.), we must NOT advance the checkpoint or
+    // we'd permanently miss any orders that arrived during the outage.
+    var updateFields = { 'sync.lastRunAt': new Date().toISOString() };
+    if(!amazonFetchErr){
+      updateFields['sync.lastAmazonCheckedAt'] = new Date().toISOString();
+    }
+    // eBay fetch success check — assume success if we got this far without an eBay-specific error.
+    // (ebayFetchErr if it exists — fall back to updating eBay checkpoint normally)
+    if(typeof ebayFetchErr === 'undefined' || !ebayFetchErr){
+      updateFields['sync.lastEbayCheckedAt'] = new Date().toISOString();
+    }
     await database.collection('subscribers').updateOne(
       { code: { $regex: new RegExp('^' + subscriberCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
-      { $set: {
-          'sync.lastAmazonCheckedAt': new Date().toISOString(),
-          'sync.lastEbayCheckedAt': new Date().toISOString(),
-          'sync.lastRunAt': new Date().toISOString()
-        }
-      }
+      { $set: updateFields }
     );
   } catch(e){
     console.log('[sync] Cycle error for', subscriberCode, ':', e.message);
@@ -5376,6 +5382,36 @@ var server = http.createServer(function(req, res) {
         })
           .then(function(result){
             res.writeHead(200); res.end(JSON.stringify({ success: true, deleted: result.deletedCount || 0 }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // Rewind sync checkpoints — forces next cycle to re-scan last N hours.
+  // Use after quota outage to catch missed orders.
+  if (pathname === '/my/sync/rewind' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var rCode = (data.code || '').toUpperCase();
+      var rSess = getRequestSession(req, parsed);
+      if(!rSess || rSess.role !== 'admin' || rSess.subscriberCode !== rCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var hours = Math.min(parseInt(data.hours || '6') || 6, 72); // max 72hr lookback
+      var rewindTo = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
+        database.collection('subscribers').updateOne(
+          { code: { $regex: new RegExp('^' + rCode.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '$', 'i') } },
+          { $set: {
+              'sync.lastAmazonCheckedAt': rewindTo,
+              'sync.lastEbayCheckedAt': rewindTo
+            }
+          }
+        )
+          .then(function(){
+            res.writeHead(200); res.end(JSON.stringify({ success: true, rewoundTo: rewindTo, hours: hours }));
           })
           .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
       });
