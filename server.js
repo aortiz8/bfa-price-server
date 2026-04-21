@@ -1466,7 +1466,7 @@ function fetchRecentEbayOrders(subscriberCode, sinceIso, cb){
       +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
       +   '<CreateTimeFrom>' + sinceIso + '</CreateTimeFrom>'
       +   '<CreateTimeTo>' + new Date().toISOString() + '</CreateTimeTo>'
-      +   '<OrderStatus>Active</OrderStatus>'
+      +   '<OrderStatus>All</OrderStatus>'
       +   '<DetailLevel>ReturnAll</DetailLevel>'
       + '</GetOrdersRequest>';
     var opts = {
