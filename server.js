@@ -2543,7 +2543,7 @@ var server = http.createServer(function(req, res) {
                   global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
                   sendResponse(result);
                 }
-                if(specificDate && simplified.length && simplified.length <= 30){
+                if((specificDate || period === 'today') && simplified.length && simplified.length <= 30){
                   var idx = 0;
                   function enrichNext(){
                     if(idx >= simplified.length){ respondWithResult(); return; }
