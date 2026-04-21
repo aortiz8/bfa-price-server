@@ -2473,9 +2473,16 @@ var server = http.createServer(function(req, res) {
         }
         function fetchOrders(nextToken, retriesLeft){
           if(typeof retriesLeft !== 'number') retriesLeft = 1;
+          // Amazon SP-API rejects CreatedBefore timestamps within 2 minutes of "now"
+          // Clamp to 3 minutes before now for safety.
+          var safeEnd = endDate;
+          if(endDate){
+            var maxAllowed = new Date(Date.now() - 3 * 60 * 1000);
+            if(endDate > maxAllowed) safeEnd = maxAllowed;
+          }
           var qp = 'MarketplaceIds=' + marketplaceId
                  + '&CreatedAfter=' + encodeURIComponent(startDate.toISOString());
-          if(endDate) qp += '&CreatedBefore=' + encodeURIComponent(endDate.toISOString());
+          if(safeEnd) qp += '&CreatedBefore=' + encodeURIComponent(safeEnd.toISOString());
           if(nextToken) qp += '&NextToken=' + encodeURIComponent(nextToken);
           var opts = {
             hostname: 'sellingpartnerapi-na.amazon.com',
@@ -2518,20 +2525,60 @@ var server = http.createServer(function(req, res) {
                     orderId: o.AmazonOrderId,
                     date: o.PurchaseDate,
                     title: '',
+                    sku: '',
                     price: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
                     paidToSeller: o.OrderTotal ? parseFloat(o.OrderTotal.Amount) : 0,
                     status: o.OrderStatus,
                     buyer: ''
                   };
                 });
-                var result = {
-                  count: allOrders.length,
-                  totalRevenue: Math.round(totalRevenue * 100) / 100,
-                  orders: simplified
-                };
-                // Cache the successful result
-                global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
-                sendResponse(result);
+                // For date-filtered queries, enrich with title+sku from orderItems
+                // (small N of orders, worth the extra SP-API calls). Sequential to avoid quota spikes.
+                function respondWithResult(){
+                  var result = {
+                    count: allOrders.length,
+                    totalRevenue: Math.round(totalRevenue * 100) / 100,
+                    orders: simplified
+                  };
+                  global._amzSalesCache[cacheKey] = { ts: Date.now(), data: result };
+                  sendResponse(result);
+                }
+                if(specificDate && simplified.length && simplified.length <= 30){
+                  var idx = 0;
+                  function enrichNext(){
+                    if(idx >= simplified.length){ respondWithResult(); return; }
+                    var o = simplified[idx];
+                    var iOpts = {
+                      hostname: 'sellingpartnerapi-na.amazon.com',
+                      path: '/orders/v0/orders/' + encodeURIComponent(o.orderId) + '/orderItems',
+                      method: 'GET',
+                      headers: { 'x-amz-access-token': accessToken }
+                    };
+                    var iReq = https.request(iOpts, function(r2){
+                      var d2 = '';
+                      r2.on('data', function(c){ d2 += c; });
+                      r2.on('end', function(){
+                        try {
+                          var j2 = JSON.parse(d2);
+                          var items = ((j2.payload || {}).OrderItems) || [];
+                          if(items[0]){
+                            o.title = items[0].Title || '';
+                            o.sku = items[0].SellerSKU || '';
+                          }
+                        } catch(e){}
+                        idx++;
+                        // Throttle between orderItems calls (SP-API quota)
+                        setTimeout(enrichNext, 250);
+                      });
+                    });
+                    iReq.on('error', function(){ idx++; setTimeout(enrichNext, 250); });
+                    iReq.setTimeout(8000, function(){ iReq.destroy(); idx++; setTimeout(enrichNext, 250); });
+                    iReq.end();
+                  }
+                  enrichNext();
+                } else {
+                  respondWithResult();
+                }
               } catch(e){
                 if(serveStaleOrError('Parse error')) return;
                 sendResponse({ error: 'Parse error', orders: [] });
