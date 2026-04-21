@@ -1884,6 +1884,24 @@ async function runSyncCycle(subscriberCode){
     var processedAmazonSet = {};
     processedAmazon.forEach(function(p){ processedAmazonSet[p.amazonOrderId] = true; });
 
+    // DIAGNOSTIC: log what sync sees on Amazon side every cycle
+    // This helps confirm whether Amazon orders are being seen at all
+    if(amazonOrders.length > 0 || amazonAllOrders.length > 0){
+      var newOrders = amazonOrders.filter(function(o){ return !processedAmazonSet[o.AmazonOrderId]; });
+      logSyncAction(subscriberCode, {
+        sku: '_debug_',
+        soldPlatform: 'amazon',
+        action: 'amazon-orders-seen',
+        reason: 'total=' + amazonAllOrders.length
+              + ' mfn=' + amazonOrders.length
+              + ' already-processed=' + processedAmazon.length
+              + ' new=' + newOrders.length
+              + ' since=' + amazonSince
+              + (newOrders.length ? ' newIds=' + newOrders.slice(0,3).map(function(o){ return o.AmazonOrderId; }).join(',') : ''),
+        success: true
+      });
+    }
+
     for(var i = 0; i < amazonOrders.length; i++){
       var order = amazonOrders[i];
       if(processedAmazonSet[order.AmazonOrderId]) continue;
