@@ -1072,14 +1072,14 @@ function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, re
 }
 
 // Main cycle runner — async, processes all qualifying warehouse-tool listings
-async function runRepricerCycle(subscriberCode){
+async function runRepricerCycle(subscriberCode, singleSku){
   if(repricerRunning[subscriberCode]){
     console.log('[repricer] Cycle already running for', subscriberCode);
     return;
   }
   repricerRunning[subscriberCode] = true;
   var cycleId = Date.now().toString();
-  console.log('[repricer] Starting cycle', cycleId, 'for', subscriberCode);
+  console.log('[repricer] Starting cycle', cycleId, 'for', subscriberCode, singleSku ? '(single SKU: ' + singleSku + ')' : '(all)');
 
   try {
     // Load subscriber + config
@@ -1105,14 +1105,18 @@ async function runRepricerCycle(subscriberCode){
       { $set: { 'repricer.lastRunStartedAt': new Date().toISOString(), 'repricer.lastRunCompletedAt': null } }
     );
 
-    // Fetch all warehouse-tool listings for this subscriber
-    var listings = await database.collection('warehouse_inventory').find({
+    // Build query — single SKU mode or all
+    var query = {
       code: subscriberCode,
       $or: [
         { status: { $ne: 'sold' } },
         { status: { $exists: false } }
       ]
-    }).toArray();
+    };
+    if(singleSku) query.sku = singleSku;
+
+    // Fetch listings for this subscriber
+    var listings = await database.collection('warehouse_inventory').find(query).toArray();
 
     console.log('[repricer]', listings.length, 'listings to check for', subscriberCode);
 
@@ -1966,7 +1970,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 3 * 60 * 1000); // every 3 min — Round 2: testing if we can beat the old program to cross-platform sync
+  }, 2 * 60 * 1000); // every 2 min — Round 3: final attempt to beat the old program at cross-platform sync
   console.log('[sync] Scheduler started');
 }
 
@@ -5598,10 +5602,14 @@ var server = http.createServer(function(req, res) {
       if(!rSess || rSess.role !== 'admin' || rSess.subscriberCode !== rCode){
         res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
       }
+      var testSku = (data.sku || '').trim() || null;
       // Kick off the repricer cycle in background (non-blocking)
       if(typeof runRepricerCycle === 'function'){
-        try { runRepricerCycle(rCode); } catch(e){}
-        res.writeHead(200); res.end(JSON.stringify({ success: true, message: 'Cycle started. Check history for progress.' }));
+        try { runRepricerCycle(rCode, testSku); } catch(e){}
+        res.writeHead(200); res.end(JSON.stringify({
+          success: true,
+          message: testSku ? ('Single-SKU test started for ' + testSku + '. Check history in a few seconds.') : 'Cycle started on all SKUs. Check history for progress.'
+        }));
       } else {
         res.writeHead(200); res.end(JSON.stringify({ success: false, message: 'Repricer engine not yet deployed. Settings can be saved, but runs are disabled.' }));
       }
