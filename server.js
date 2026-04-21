@@ -1477,7 +1477,7 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
 // Used by: sync cycle, pick list, sales today.
 // TTL: 15 min — aligned with pick list / sales cache.
 // ─────────────────────────────────────────────────────────────
-var SHARED_AMZ_ORDERS_TTL = 15 * 60 * 1000;
+var SHARED_AMZ_ORDERS_TTL = 3 * 60 * 1000;
 var SHARED_AMZ_ORDERS_LOOKBACK_DAYS = 7;
 
 function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
@@ -1802,60 +1802,14 @@ async function runSyncCycle(subscriberCode){
       success: true
     });
 
-    // ── AMAZON SIDE — targeted fresh fetch (does NOT use shared cache)
-    // The shared cache can be up to 15min stale, which means sync would miss
-    // new sales until cache refreshes. We do our own small, targeted fetch
-    // with CreatedAfter = lastCheckedTime for the fastest response.
+    // ── AMAZON SIDE — uses shared cache (3min TTL) ──
+    // Shared cache shared with pick list, sales to minimize Amazon API quota.
     var amazonFetchErr = null;
     var amazonAllOrders = await new Promise(function(resolve){
-      var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
-      getAmazonAccessToken(function(tokenErr, accessToken){
-        if(tokenErr){
-          amazonFetchErr = 'auth: ' + tokenErr;
-          // Try shared cache fallback
-          getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders){
-            resolve(err ? [] : (orders || []));
-          });
-          return;
-        }
-        var qp = 'MarketplaceIds=' + marketplaceId + '&CreatedAfter=' + encodeURIComponent(amazonSince);
-        var allPages = [];
-        function fetchNext(nextToken){
-          var path = '/orders/v0/orders?' + qp + (nextToken ? '&NextToken=' + encodeURIComponent(nextToken) : '');
-          var opts = {
-            hostname: 'sellingpartnerapi-na.amazon.com',
-            path: path, method: 'GET',
-            headers: { 'x-amz-access-token': accessToken }
-          };
-          var aReq = https.request(opts, function(r){
-            var data = '';
-            r.on('data', function(c){ data += c; });
-            r.on('end', function(){
-              try {
-                var json = JSON.parse(data);
-                if(json.errors && json.errors[0]){
-                  amazonFetchErr = json.errors[0].message || json.errors[0].code;
-                  // Try shared cache fallback on error
-                  getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders){
-                    resolve(err ? [] : (orders || []));
-                  });
-                  return;
-                }
-                var payload = json.payload || {};
-                allPages = allPages.concat(payload.Orders || []);
-                if(payload.NextToken){ fetchNext(payload.NextToken); return; }
-                resolve(allPages);
-              } catch(e){
-                amazonFetchErr = 'parse error';
-                resolve([]);
-              }
-            });
-          });
-          aReq.on('error', function(e){ amazonFetchErr = e.message; resolve([]); });
-          aReq.setTimeout(20000, function(){ aReq.destroy(); amazonFetchErr = 'timeout'; resolve([]); });
-          aReq.end();
-        }
-        fetchNext(null);
+      getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders, info){
+        if(err) amazonFetchErr = err;
+        if(info && info.stale && info.error) amazonFetchErr = info.error;
+        resolve(err ? [] : (orders || []));
       });
     });
     // Filter to MFN only (sync only processes orders Amazon doesn't ship for us)
@@ -2075,7 +2029,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 2 * 60 * 1000); // every 2 min — Round 3: final attempt to beat the old program at cross-platform sync
+  }, 3 * 60 * 1000); // every 3 min — balance sync freshness with Amazon quota
   console.log('[sync] Scheduler started');
 }
 
