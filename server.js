@@ -1421,6 +1421,11 @@ var server = http.createServer(function(req, res) {
         var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
         startDate = new Date(monday.getTime() + offsetMinutes * 60000);
         endDate = null;
+      } else if (period === 'lastmonth-to-date') {
+        var lmStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() - 1, 1));
+        var lmEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() - 1, localNow.getUTCDate() + 1));
+        startDate = new Date(lmStart.getTime() + offsetMinutes * 60000);
+        endDate = new Date(lmEnd.getTime() + offsetMinutes * 60000);
       } else {
         var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
         startDate = new Date(monthStart.getTime() + offsetMinutes * 60000);
@@ -1523,6 +1528,12 @@ var server = http.createServer(function(req, res) {
         var monday = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), localNow.getUTCDate() - daysFromMonday));
         startDate = new Date(monday.getTime() + offsetMinutes * 60000);
         endDate = null;
+      } else if (period === 'lastmonth-to-date') {
+        // Same day range as this month, but one month back. e.g. if today = Apr 20, range = Mar 1 00:00 → Mar 20 23:59:59
+        var lmStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() - 1, 1));
+        var lmEnd = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth() - 1, localNow.getUTCDate() + 1));
+        startDate = new Date(lmStart.getTime() + offsetMinutes * 60000);
+        endDate = new Date(lmEnd.getTime() + offsetMinutes * 60000);
       } else { // month
         var monthStart = new Date(Date.UTC(localNow.getUTCFullYear(), localNow.getUTCMonth(), 1));
         startDate = new Date(monthStart.getTime() + offsetMinutes * 60000);
