@@ -1966,7 +1966,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 5 * 60 * 1000); // every 5 min (Amazon SP-API Orders quota is strict)
+  }, 4 * 60 * 1000); // every 4 min — testing if we can beat the old program to cross-platform sync
   console.log('[sync] Scheduler started');
 }
 
@@ -2227,14 +2227,19 @@ var server = http.createServer(function(req, res) {
   // Fetches item details (SKU, title) per order, caching in MongoDB to avoid re-fetching.
   if (pathname === '/my/amazon/picklist' && req.method === 'GET') {
     var aCode = (parsed.query.code || '').toUpperCase();
+    var bypassCache = parsed.query.bypass === '1';
 
     // Server-side cache — 15 min fresh, serves stale on quota errors
     var CACHE_TTL = 15 * 60 * 1000;
     if(!global._amzPicklistCache) global._amzPicklistCache = {};
     var cached = global._amzPicklistCache[aCode];
     var nowMs = Date.now();
-    if(cached && (nowMs - cached.ts) < CACHE_TTL){
+    if(cached && !bypassCache && (nowMs - cached.ts) < CACHE_TTL){
       res.writeHead(200); res.end(JSON.stringify(cached.data)); return;
+    }
+    // If bypassing, also invalidate the shared Amazon orders cache so we pull fresh from Amazon
+    if(bypassCache && global._sharedAmzOrders){
+      delete global._sharedAmzOrders[aCode];
     }
 
     getSubscriber(aCode, function(err, sub){
@@ -2414,13 +2419,14 @@ var server = http.createServer(function(req, res) {
 
   if (pathname === '/my/ebay/picklist' && req.method === 'GET') {
     var code = (parsed.query.code || '').toUpperCase();
+    var bypassEbayCache = parsed.query.bypass === '1';
 
     // Server-side cache — 15 min fresh, serves stale on errors
     var EBAY_PL_CACHE_TTL = 15 * 60 * 1000;
     if(!global._ebayPicklistCache) global._ebayPicklistCache = {};
     var ebayCached = global._ebayPicklistCache[code];
     var ebayNowMs = Date.now();
-    if(ebayCached && (ebayNowMs - ebayCached.ts) < EBAY_PL_CACHE_TTL){
+    if(ebayCached && !bypassEbayCache && (ebayNowMs - ebayCached.ts) < EBAY_PL_CACHE_TTL){
       res.writeHead(200); res.end(JSON.stringify(ebayCached.data)); return;
     }
 
