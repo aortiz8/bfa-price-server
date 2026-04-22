@@ -5431,6 +5431,121 @@ var server = http.createServer(function(req, res) {
   }
 
   // Delete all debug/error entries older than now (cleanup noisy entries)
+  // GET /my/sync/health?code=X — returns health summary for sync dashboard indicator
+  if (pathname === '/my/sync/health' && req.method === 'GET') {
+    var hCode = (parsed.query.code || '').toUpperCase();
+    var hSess = getRequestSession(req, parsed);
+    if(!hSess || hSess.role !== 'admin' || hSess.subscriberCode !== hCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    getSubscriber(hCode, function(err, sub){
+      if(!sub){ res.writeHead(404); res.end(JSON.stringify({ error: 'Not found' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){
+          res.writeHead(200); res.end(JSON.stringify({ status: 'unknown', reason: 'DB unavailable' }));
+          return;
+        }
+        var syncCfg = sub.sync || {};
+        var enabled = !!syncCfg.enabled;
+        var lastRunAt = syncCfg.lastRunAt ? new Date(syncCfg.lastRunAt) : null;
+        var lastAmazon = syncCfg.lastAmazonCheckedAt ? new Date(syncCfg.lastAmazonCheckedAt) : null;
+
+        // Compute minutes since last successful run
+        var now = Date.now();
+        var minutesSinceRun = lastRunAt ? Math.round((now - lastRunAt.getTime()) / 60000) : null;
+        var minutesSinceAmazon = lastAmazon ? Math.round((now - lastAmazon.getTime()) / 60000) : null;
+
+        // Fetch recent sync log entries (last hour) to count errors and review items
+        var oneHourAgo = new Date(now - 60 * 60 * 1000);
+        database.collection('sync_log').find({
+          subscriberCode: hCode,
+          createdAt: { $gte: oneHourAgo }
+        }).sort({ createdAt: -1 }).limit(200).toArray()
+          .then(function(rows){
+            var errorCount = 0;
+            var reviewCount = 0;
+            var successCount = 0;
+            var lastCycleStart = null;
+            var lastRealAction = null;
+            (rows || []).forEach(function(r){
+              if(r.sku === '_error_') errorCount++;
+              if(r.needsReview) reviewCount++;
+              if(r.action === 'end-ebay-listing' || r.action === 'delete-amazon-listing' || r.action === 'skip'){
+                if(!lastRealAction) lastRealAction = r.createdAt;
+              }
+              if(r.action === 'sync-cycle-start' && !lastCycleStart) lastCycleStart = r.createdAt;
+            });
+
+            // Also count open (undismissed) review items across ALL time
+            return database.collection('sync_log').countDocuments({
+              subscriberCode: hCode,
+              needsReview: true
+            }).then(function(totalReviewOpen){
+              // Determine health status
+              var status = 'green';
+              var reasons = [];
+
+              if(!enabled){
+                status = 'red';
+                reasons.push('Auto-sync is OFF');
+              } else if(minutesSinceRun === null){
+                status = 'yellow';
+                reasons.push('No cycle has run yet');
+              } else if(minutesSinceRun > 15){
+                status = 'red';
+                reasons.push('Last cycle was ' + minutesSinceRun + ' min ago');
+              } else if(minutesSinceRun > 7){
+                status = 'yellow';
+                reasons.push('Last cycle was ' + minutesSinceRun + ' min ago');
+              }
+
+              if(totalReviewOpen > 0){
+                if(status === 'green') status = 'yellow';
+                reasons.push(totalReviewOpen + ' item' + (totalReviewOpen > 1 ? 's' : '') + ' need review');
+              }
+
+              if(errorCount >= 5){
+                if(status !== 'red') status = 'yellow';
+                reasons.push(errorCount + ' errors in last hour');
+              }
+
+              if(minutesSinceAmazon !== null && minutesSinceAmazon > 10){
+                if(status === 'green') status = 'yellow';
+                reasons.push('Amazon checkpoint ' + minutesSinceAmazon + ' min behind');
+              }
+
+              // Short user-friendly label
+              var label = 'Healthy';
+              if(status === 'yellow') label = 'Minor issues';
+              if(status === 'red') label = 'Attention needed';
+              if(!enabled) label = 'Paused';
+
+              res.writeHead(200); res.end(JSON.stringify({
+                status: status,
+                label: label,
+                enabled: enabled,
+                lastRunAt: lastRunAt ? lastRunAt.toISOString() : null,
+                lastAmazonCheckedAt: lastAmazon ? lastAmazon.toISOString() : null,
+                minutesSinceRun: minutesSinceRun,
+                minutesSinceAmazon: minutesSinceAmazon,
+                lastHourStats: {
+                  errors: errorCount,
+                  review: reviewCount,
+                  success: successCount
+                },
+                totalReviewOpen: totalReviewOpen,
+                reasons: reasons
+              }));
+            });
+          })
+          .catch(function(e){
+            res.writeHead(200); res.end(JSON.stringify({ status: 'unknown', reason: e.message }));
+          });
+      });
+    });
+    return;
+  }
+
   if (pathname === '/my/sync/log/clear-debug' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var cCode = (data.code || '').toUpperCase();
