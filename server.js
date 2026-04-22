@@ -1477,7 +1477,7 @@ function fetchRecentAmazonOrders(accessToken, marketplaceId, sinceIso, cb){
 // Used by: sync cycle, pick list, sales today.
 // TTL: 15 min — aligned with pick list / sales cache.
 // ─────────────────────────────────────────────────────────────
-var SHARED_AMZ_ORDERS_TTL = 3 * 60 * 1000;
+var SHARED_AMZ_ORDERS_TTL = 15 * 60 * 1000;
 var SHARED_AMZ_ORDERS_LOOKBACK_DAYS = 7;
 
 function getRecentAmazonOrdersShared(subscriberCode, sub, cb){
@@ -2100,7 +2100,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 2 * 60 * 1000); // every 2 min — checkpoint bug is fixed, quota protected by 3-min shared cache TTL
+  }, 3 * 60 * 1000); // every 3 min — paired with 15-min shared cache TTL for quota comfort
   console.log('[sync] Scheduler started');
 }
 
@@ -2790,14 +2790,13 @@ var server = http.createServer(function(req, res) {
     var offsetMinutes = parseInt(parsed.query.offset || '0');
     var specificDate = parsed.query.date || null;
 
-    // Cache tier by period — balance freshness vs SP-API quota
-    // Today needs frequent refresh (new sales arriving), historical can cache long.
+    // All periods unified at 15min. Historical dates keep 60min cache.
     var CACHE_TTL_MS = {
-      'today': 2 * 60 * 1000,        // 2min — today's sales change frequently
-      'week':  10 * 60 * 1000,       // 10min
-      'month': 15 * 60 * 1000,       // 15min
-      'lastmonth-to-date': 30 * 60 * 1000, // 30min (historical, doesn't change much)
-      'date':  60 * 60 * 1000        // 1hr (fully historical)
+      'today': 15 * 60 * 1000,
+      'week':  15 * 60 * 1000,
+      'month': 15 * 60 * 1000,
+      'lastmonth-to-date': 30 * 60 * 1000,
+      'date':  60 * 60 * 1000
     };
     var cacheKey = code + '|' + (specificDate ? 'date:' + specificDate : period);
     var ttl = specificDate ? CACHE_TTL_MS.date : (CACHE_TTL_MS[period] || 15 * 60 * 1000);
@@ -3003,11 +3002,11 @@ var server = http.createServer(function(req, res) {
     var offsetMinutes = parseInt(parsed.query.offset || '0');
     var specificDate = parsed.query.date || null; // YYYY-MM-DD for specific date
 
-    // Cache tier — today refreshes frequently, historical caches longer
+    // All periods unified at 15min — matches Amazon sales cache
     var EBAY_CACHE_TTL_MS = {
-      'today': 2 * 60 * 1000,        // 2min
-      'week':  10 * 60 * 1000,       // 10min
-      'month': 15 * 60 * 1000,       // 15min
+      'today': 15 * 60 * 1000,
+      'week':  15 * 60 * 1000,
+      'month': 15 * 60 * 1000,
       'lastmonth-to-date': 30 * 60 * 1000,
       'date':  60 * 60 * 1000
     };
