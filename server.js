@@ -2100,7 +2100,7 @@ function startSyncScheduler(){
         })
         .catch(function(){});
     });
-  }, 3 * 60 * 1000); // every 3 min — paired with 15-min shared cache TTL for quota comfort
+  }, 5 * 60 * 1000); // every 5 min — quota-friendly, checkpoint fix guarantees no data loss
   console.log('[sync] Scheduler started');
 }
 
@@ -5419,6 +5419,11 @@ var server = http.createServer(function(req, res) {
     var limit = Math.min(parseInt(parsed.query.limit || '100') || 100, 500);
     var filter = { subscriberCode: lCode };
     if(parsed.query.needsReview === 'true') filter.needsReview = true;
+    // Hide debug + error diagnostic rows by default (clean UX).
+    // Pass ?showDebug=1 to include them (for troubleshooting).
+    if(parsed.query.showDebug !== '1'){
+      filter.sku = { $nin: ['_debug_', '_error_'] };
+    }
     connectMongo(function(err, database){
       if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ log: [] })); return; }
       database.collection('sync_log').find(filter).sort({ createdAt: -1 }).limit(limit).toArray()
