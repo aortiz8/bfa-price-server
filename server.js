@@ -5327,6 +5327,234 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ───────────────────────────────────────────────────────────
+  // BULK WIPE — Warehouse Tool Listings
+  // ───────────────────────────────────────────────────────────
+  // Warehouse-tool listings are those inserted via /warehouse/item (no `source` field).
+  // CSV imports have `source: 'csv-import'`; backfilled SKU→location mappings have
+  // `backfilled: true`. We exclude both so we never touch bulk-imported inventory or
+  // legacy location mappings.
+  //
+  // Filter used in both endpoints (must match exactly):
+  //   { code: X, source: { $ne: 'csv-import' }, backfilled: { $ne: true } }
+  //
+  // Two endpoints:
+  //   GET  /my/warehouse-listings/preview?code=X  — count + sample list (safe, read-only)
+  //   POST /my/warehouse-listings/delete          — destructive; requires typed confirm
+  //
+  // Database records only. Does NOT touch live Amazon/eBay listings.
+
+  if (pathname === '/my/warehouse-listings/preview' && req.method === 'GET') {
+    var pCode = (parsed.query.code || '').toUpperCase();
+    var pSess = getRequestSession(req, parsed);
+    if(!pSess || pSess.role !== 'admin' || pSess.subscriberCode !== pCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    // Optional scope filters — caller sends ISO timestamps (computed client-side
+    // using browser local time so "yesterday" respects the user's timezone).
+    var pSinceIso = parsed.query.sinceIso || null;
+    var pUntilIso = parsed.query.untilIso || null;
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+      // Base filter — never touch CSV imports or backfilled location-only stubs.
+      var warehouseFilter = { code: pCode, source: { $ne: 'csv-import' }, backfilled: { $ne: true } };
+      // Layer on the createdAt bounds if provided.
+      var dateBounds = {};
+      if(pSinceIso){ try { dateBounds.$gte = new Date(pSinceIso); } catch(e){} }
+      if(pUntilIso){ try { dateBounds.$lte = new Date(pUntilIso); } catch(e){} }
+      if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+
+      // Bump sample limit to 500 so the UI can show the full list for typical test batches.
+      var SAMPLE_LIMIT = 500;
+      Promise.all([
+        database.collection('warehouse_inventory').countDocuments(warehouseFilter),
+        database.collection('warehouse_inventory').countDocuments({ code: pCode, source: 'csv-import' }),
+        database.collection('warehouse_inventory').countDocuments({ code: pCode, backfilled: true }),
+        database.collection('warehouse_inventory').find(warehouseFilter)
+          .project({ sku:1, title:1, author:1, createdAt:1, listedOn:1, status:1, asin:1, ebayItemId:1 })
+          .sort({ createdAt: -1 })
+          .limit(SAMPLE_LIMIT)
+          .toArray(),
+        // Status breakdown so Adam can see active vs sold vs deleted before nuking
+        database.collection('warehouse_inventory').aggregate([
+          { $match: warehouseFilter },
+          { $group: { _id: '$status', count: { $sum: 1 } } }
+        ]).toArray()
+      ]).then(function(results){
+        var statusBreakdown = {};
+        (results[4] || []).forEach(function(s){ statusBreakdown[s._id || 'unknown'] = s.count; });
+        res.writeHead(200); res.end(JSON.stringify({
+          totalToDelete: results[0],
+          willPreserve: {
+            csvImports: results[1],
+            backfilled: results[2]
+          },
+          statusBreakdown: statusBreakdown,
+          scope: { sinceIso: pSinceIso, untilIso: pUntilIso },
+          sample: results[3] || [],
+          sampleNote: results[3].length < results[0]
+            ? 'Showing ' + results[3].length + ' most recent of ' + results[0] + ' total'
+            : 'Showing all ' + results[0] + ' records'
+        }));
+      }).catch(function(e){
+        res.writeHead(200); res.end(JSON.stringify({ error: e.message }));
+      });
+    });
+    return;
+  }
+
+  if (pathname === '/my/warehouse-listings/delete' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var wCode = (data.code || '').toUpperCase();
+      var wSess = getRequestSession(req, parsed);
+      if(!wSess || wSess.role !== 'admin' || wSess.subscriberCode !== wCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      // Typed confirmation required — prevents accidental nukes from replay / bad clients.
+      if(data.confirm !== 'DELETE WAREHOUSE'){
+        res.writeHead(400); res.end(JSON.stringify({
+          error: 'Confirmation required. Send { confirm: "DELETE WAREHOUSE" } to proceed.'
+        }));
+        return;
+      }
+
+      // Optional scope filters (must match the preview that was just shown).
+      var wSinceIso = data.sinceIso || null;
+      var wUntilIso = data.untilIso || null;
+      // When true, we also end the live eBay listing and delete the Amazon listing
+      // before removing the MongoDB record. When false, DB-only (legacy behavior).
+      var killLive = !!data.killLive;
+
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        var warehouseFilter = { code: wCode, source: { $ne: 'csv-import' }, backfilled: { $ne: true } };
+        var dateBounds = {};
+        if(wSinceIso){ try { dateBounds.$gte = new Date(wSinceIso); } catch(e){} }
+        if(wUntilIso){ try { dateBounds.$lte = new Date(wUntilIso); } catch(e){} }
+        if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+
+        // ── DB-ONLY PATH (backwards-compatible, fast) ──
+        if(!killLive){
+          database.collection('warehouse_inventory').deleteMany(warehouseFilter)
+            .then(function(r){
+              res.writeHead(200); res.end(JSON.stringify({
+                success: true,
+                deleted: r.deletedCount || 0,
+                note: 'MongoDB records removed. Live Amazon/eBay listings on those platforms are untouched.'
+              }));
+            })
+            .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          return;
+        }
+
+        // ── FULL CLEANUP PATH (DB + platforms) ──
+        // Need the full record list so we know each item's ebayItemId / asin / listedOn.
+        database.collection('warehouse_inventory').find(warehouseFilter).toArray()
+          .then(function(items){
+            if(!items.length){
+              res.writeHead(200); res.end(JSON.stringify({
+                success: true, deleted: 0, results: [], killLive: true,
+                note: 'Nothing matched the filter.'
+              }));
+              return;
+            }
+
+            getSubscriber(wCode, function(err, sub){
+              if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
+              var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+              var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+
+              // One Amazon access token for the whole batch (valid 1hr, plenty).
+              getAmazonAccessToken(function(tokErr, accessToken){
+                if(tokErr) accessToken = null; // we'll still try the rest
+
+                var results = [];
+                var idx = 0;
+                function processNext(){
+                  if(idx >= items.length){
+                    // Done with per-item cleanup → now bulk-delete the MongoDB records.
+                    var idsToDelete = results.filter(function(r){ return r._id; }).map(function(r){ return r._id; });
+                    if(!idsToDelete.length){
+                      res.writeHead(200); res.end(JSON.stringify({
+                        success: true, deleted: 0, results: results, killLive: true
+                      }));
+                      return;
+                    }
+                    database.collection('warehouse_inventory').deleteMany({ _id: { $in: idsToDelete } })
+                      .then(function(delResult){
+                        // Mark each result row with the DB outcome.
+                        results.forEach(function(r){ r.db = delResult.deletedCount ? 'deleted' : 'not-found'; });
+                        res.writeHead(200); res.end(JSON.stringify({
+                          success: true,
+                          deleted: delResult.deletedCount || 0,
+                          total: items.length,
+                          killLive: true,
+                          results: results.map(function(r){ var c = Object.assign({}, r); delete c._id; return c; })
+                        }));
+                      })
+                      .catch(function(e){
+                        res.writeHead(200); res.end(JSON.stringify({
+                          error: 'Platform cleanup completed but DB deleteMany failed: ' + e.message,
+                          results: results
+                        }));
+                      });
+                    return;
+                  }
+
+                  var it = items[idx++];
+                  var itemResult = {
+                    _id: it._id, // kept internal for the final bulk delete
+                    sku: it.sku,
+                    title: (it.title || '').substring(0, 80),
+                    ebay: 'not-listed',
+                    amazon: 'not-listed',
+                    db: 'pending'
+                  };
+
+                  var listed = it.listedOn || [];
+                  var doEbay = listed.indexOf('ebay') !== -1 && it.ebayItemId;
+                  var doAmazon = listed.indexOf('amazon') !== -1 && it.asin;
+
+                  function stepEbay(after){
+                    if(!doEbay){ after(); return; }
+                    endEbayListing(wCode, it.ebayItemId, function(endErr, endInfo){
+                      if(endErr){ itemResult.ebay = 'error: ' + endErr; }
+                      else if(endInfo && endInfo.alreadyGone){ itemResult.ebay = 'already-ended'; }
+                      else { itemResult.ebay = 'ended'; }
+                      after();
+                    });
+                  }
+
+                  function stepAmazon(after){
+                    if(!doAmazon){ after(); return; }
+                    if(!accessToken){ itemResult.amazon = 'error: no Amazon token'; after(); return; }
+                    deleteAmazonListing(accessToken, sellerId, it.sku, marketplaceId, function(delErr, delInfo){
+                      if(delErr){ itemResult.amazon = 'error: ' + delErr; }
+                      else if(delInfo && delInfo.alreadyGone){
+                        itemResult.amazon = delInfo.verifiedGone ? 'already-gone (verified)' : 'already-gone';
+                      }
+                      else { itemResult.amazon = 'deleted'; }
+                      after();
+                    });
+                  }
+
+                  stepEbay(function(){
+                    stepAmazon(function(){
+                      results.push(itemResult);
+                      processNext();
+                    });
+                  });
+                }
+                processNext();
+              });
+            });
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
   // Bulk-upsert SKU → location mappings into warehouse_inventory.
   // Admin-only. Used to backfill locations for items listed before location tracking existed.
   // POST /my/backfill-locations  body: { code, entries: [{sku, row, section, sequence}, ...] }
