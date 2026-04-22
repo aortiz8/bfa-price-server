@@ -1108,12 +1108,11 @@ async function runRepricerCycle(subscriberCode, singleSku){
     );
 
     // Build query — single SKU mode or all
+    // Exclude any book with a "sold" status. The $nin operator matches docs
+    // where status field doesn't exist OR status is not in the excluded list.
     var query = {
       code: subscriberCode,
-      $or: [
-        { status: { $ne: 'sold' } },
-        { status: { $exists: false } }
-      ]
+      status: { $nin: ['sold', 'sold-amazon', 'sold-ebay'] }
     };
     if(singleSku) query.sku = singleSku;
 
@@ -1796,9 +1795,10 @@ function verifyAmazonListingGone(accessToken, sellerId, sku, marketplaceId, dele
         }
         return;
       }
-      // 403 on GET too — probably a permissions issue, not an actual state
+      // 403 on GET also — in practice this means the SKU is deleted.
+      // Amazon's Listings API returns 403 (not 404) for deleted SKUs.
       if(r.statusCode === 403){
-        cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET also returned 403 — cannot verify' });
+        cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: true, verifiedGone: true, verifyNote: 'confirmed deleted (GET:403)' });
         return;
       }
       cb({ alreadyGone: true, statusCode: deleteStatusCode, verified: false, verifyNote: 'GET returned ' + r.statusCode });
