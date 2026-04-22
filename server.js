@@ -1998,6 +1998,17 @@ async function runSyncCycle(subscriberCode){
       if(eo.orderId && processedEbaySet[eo.orderId]) continue;
       if(!eo.sku) continue;
 
+      // eBay-only SKU prefixes — these books are listed only on eBay, never on Amazon.
+      // Skip Amazon deletion entirely, log as clean success.
+      var skuUpper = (eo.sku || '').toUpperCase();
+      if(skuUpper.indexOf('MX-') === 0 || skuUpper.indexOf('UP-') === 0){
+        logSyncAction(subscriberCode, {
+          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          action: 'skip', reason: 'eBay-only SKU (no Amazon twin)', success: true
+        });
+        continue;
+      }
+
       var record2 = await database.collection('warehouse_inventory').findOne({ code: subscriberCode, sku: eo.sku });
       if(!record2){
         logSyncAction(subscriberCode, {
