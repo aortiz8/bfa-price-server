@@ -4217,10 +4217,10 @@ var server = http.createServer(function(req, res) {
         + '<ScheduleTime>' + scheduleTime + '</ScheduleTime>'
         + sellerProfiles2
         + '<ItemSpecifics>'
-        + '<NameValueList><n>Book Title</n><Value>Health Check Test</Value></NameValueList>'
-        + '<NameValueList><n>Author</n><Value>Test</Value></NameValueList>'
-        + '<NameValueList><n>Language</n><Value>English</Value></NameValueList>'
-        + '<NameValueList><n>Format</n><Value>Paperback</Value></NameValueList>'
+        + '<NameValueList><Name>Book Title</Name><Value>Health Check Test</Value></NameValueList>'
+        + '<NameValueList><Name>Author</Name><Value>Test</Value></NameValueList>'
+        + '<NameValueList><Name>Language</Name><Value>English</Value></NameValueList>'
+        + '<NameValueList><Name>Format</Name><Value>Paperback</Value></NameValueList>'
         + '</ItemSpecifics>'
         + '</Item>'
         + '</VerifyAddItemRequest>';
@@ -4694,17 +4694,17 @@ var server = http.createServer(function(req, res) {
           + '<SellerPaymentProfile><PaymentProfileID>' + paymentPolicyId + '</PaymentProfileID></SellerPaymentProfile>'
           + '</SellerProfiles>'
           + '<ItemSpecifics>'
-          + '<NameValueList><n>Book Title</n><Value>' + esc((data.bookTitle || data.title || '').replace(/^—+$/, '').substring(0,65) || 'See description') + '</Value></NameValueList>'
-          + '<NameValueList><n>Author</n><Value>' + esc((data.author && data.author.replace(/^—+$/, '')) || 'Unknown').substring(0,65) + '</Value></NameValueList>'
-          + '<NameValueList><n>Language</n><Value>' + esc(data.language && data.language.length > 1 ? data.language.charAt(0).toUpperCase() + data.language.slice(1).toLowerCase() : 'English') + '</Value></NameValueList>'
-          + (data.publisher ? '<NameValueList><n>Publisher</n><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
-          + (data.year ? '<NameValueList><n>Publication Year</n><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
-          + (data.format ? '<NameValueList><n>Format</n><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
-          + (data.edition ? '<NameValueList><n>Edition</n><Value>' + esc(data.edition) + '</Value></NameValueList>' : '')
-          + (data.pages ? '<NameValueList><n>Number of Pages</n><Value>' + esc(String(data.pages)) + '</Value></NameValueList>' : '')
-          + (data.series ? '<NameValueList><n>Series</n><Value>' + esc(data.series).substring(0,65) + '</Value></NameValueList>' : '')
+          + '<NameValueList><Name>Book Title</Name><Value>' + esc((data.bookTitle || data.title || '').replace(/^—+$/, '').substring(0,65) || 'See description') + '</Value></NameValueList>'
+          + '<NameValueList><Name>Author</Name><Value>' + esc((data.author && data.author.replace(/^—+$/, '')) || 'Unknown').substring(0,65) + '</Value></NameValueList>'
+          + '<NameValueList><Name>Language</Name><Value>' + esc(data.language && data.language.length > 1 ? data.language.charAt(0).toUpperCase() + data.language.slice(1).toLowerCase() : 'English') + '</Value></NameValueList>'
+          + (data.publisher ? '<NameValueList><Name>Publisher</Name><Value>' + esc(data.publisher).substring(0,65) + '</Value></NameValueList>' : '')
+          + (data.year ? '<NameValueList><Name>Publication Year</Name><Value>' + esc(data.year) + '</Value></NameValueList>' : '')
+          + (data.format ? '<NameValueList><Name>Format</Name><Value>' + esc(data.format) + '</Value></NameValueList>' : '')
+          + (data.edition ? '<NameValueList><Name>Edition</Name><Value>' + esc(data.edition) + '</Value></NameValueList>' : '')
+          + (data.pages ? '<NameValueList><Name>Number of Pages</Name><Value>' + esc(String(data.pages)) + '</Value></NameValueList>' : '')
+          + (data.series ? '<NameValueList><Name>Series</Name><Value>' + esc(data.series).substring(0,65) + '</Value></NameValueList>' : '')
           + '</ItemSpecifics>'
-          + (data.isbn ? '<ProductListingDetails><ISBN>' + esc(data.isbn) + '</ISBN><IncludeStockPhotoURL>true</IncludeStockPhotoURL><UseStockPhotoURLAsGallery>true</UseStockPhotoURLAsGallery></ProductListingDetails>' : '')
+          + (data.isbn ? '<ProductListingDetails><ISBN>' + esc(data.isbn) + '</ISBN><IncludeeBayProductDetails>false</IncludeeBayProductDetails><UseStockPhotoURLAsGallery>false</UseStockPhotoURLAsGallery></ProductListingDetails>' : '')
           + '</Item>'
           + '</AddItemRequest>';
         console.log('Warehouse eBay XML ItemSpecifics:', xml.substring(xml.indexOf('<ItemSpecifics>'), xml.indexOf('</ItemSpecifics>') + 16));
