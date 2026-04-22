@@ -807,6 +807,52 @@ function uploadPicture(base64Image, userToken, devId, cb) {
   req.write(bodyBuffer); req.end();
 }
 
+// Download an image URL (e.g. Amazon catalog image) and upload it to eBay's image hosting.
+// Returns eBay's hosted URL so eBay's image fetcher doesn't have to touch Amazon.
+// Falls back to returning the original URL if download or upload fails.
+function rehostCoverForEbay(imageUrl, userToken, devId, cb){
+  if(!imageUrl){ cb(null, ''); return; }
+  try {
+    var url = require('url').parse(imageUrl);
+  } catch(e){ cb(null, imageUrl); return; }
+  var lib = url.protocol === 'http:' ? require('http') : https;
+  var imgReq = lib.request({
+    hostname: url.hostname,
+    path: url.path,
+    method: 'GET',
+    headers: {
+      // Amazon's image CDN returns faster/more reliably with a browser UA
+      'User-Agent': 'Mozilla/5.0 (compatible; BFA-Platform)',
+      'Accept': 'image/jpeg,image/png,image/*'
+    }
+  }, function(r){
+    if(r.statusCode !== 200){
+      // Couldn't fetch the image — fall back to original URL
+      cb(null, imageUrl);
+      return;
+    }
+    var chunks = [];
+    r.on('data', function(c){ chunks.push(c); });
+    r.on('end', function(){
+      try {
+        var buf = Buffer.concat(chunks);
+        var b64 = buf.toString('base64');
+        // Upload to eBay's hosted images
+        uploadPicture(b64, userToken, devId, function(upErr, ebayUrl){
+          if(upErr || !ebayUrl){
+            cb(null, imageUrl); // Fall back to original
+            return;
+          }
+          cb(null, ebayUrl);
+        });
+      } catch(e){ cb(null, imageUrl); }
+    });
+  });
+  imgReq.on('error', function(){ cb(null, imageUrl); });
+  imgReq.setTimeout(15000, function(){ imgReq.destroy(); cb(null, imageUrl); });
+  imgReq.end();
+}
+
 // ===================== REPRICER ENGINE =====================
 // Tracks running cycles per subscriber so we don't double-run
 var repricerRunning = {};
@@ -4613,9 +4659,16 @@ var server = http.createServer(function(req, res) {
         var conditionId = data.conditionId || 5000;
         var desc = cleanDescription(data.description || '');
 
-        // Build picture URL from cover image
-        // Use eBay's own stock photo via ISBN - more reliable than external URLs
-        var pictureXml = '';
+        // Build picture URLs — eBay requires at least 1 photo and can't fetch from Amazon's
+        // image CDN reliably (rejection "needs picture"). Rehost through our server → eBay's
+        // own picture hosting so eBay never has to touch Amazon.
+        rehostCoverForEbay(data.coverUrl || '', userToken, devId, function(rehostErr, effectiveCoverUrl){
+          var pictureXml = '';
+          if(effectiveCoverUrl){
+            pictureXml = '<PictureDetails><GalleryType>Gallery</GalleryType><PictureURL>' + esc(effectiveCoverUrl) + '</PictureURL></PictureDetails>';
+          } else {
+            pictureXml = '<PictureDetails><GalleryType>Gallery</GalleryType></PictureDetails>';
+          }
 
         var xml = '<?xml version="1.0" encoding="utf-8"?>'
           + '<AddItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
@@ -4632,10 +4685,9 @@ var server = http.createServer(function(req, res) {
           + '<DispatchTimeMax>2</DispatchTimeMax>'
           + '<ListingDuration>GTC</ListingDuration>'
           + '<ListingType>FixedPriceItem</ListingType>'
-          + '<PictureDetails><GalleryType>Gallery</GalleryType></PictureDetails>'
+          + pictureXml
           + '<SKU>' + esc(data.sku || '') + '</SKU>'
           + '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>'
-          + pictureXml
           + '<SellerProfiles>'
           + '<SellerShippingProfile><ShippingProfileID>' + shippingPolicyId + '</ShippingProfileID></SellerShippingProfile>'
           + '<SellerReturnProfile><ReturnProfileID>' + returnPolicyId + '</ReturnProfileID></SellerReturnProfile>'
@@ -4699,6 +4751,7 @@ var server = http.createServer(function(req, res) {
         ebayReq.setTimeout(30000, function(){ ebayReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'Timeout' })); });
         ebayReq.write(xml);
         ebayReq.end();
+        }); // close rehostCoverForEbay callback
       });
     });
     return;
