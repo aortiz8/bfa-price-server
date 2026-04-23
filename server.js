@@ -5305,28 +5305,6 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Subscriber self-service: update own settings ──
-  // Delete items from warehouse_inventory by SKU.
-  // Admin-only. Used to remove test or incorrect backfill entries.
-  // POST /my/delete-inventory  body: { code, skus: ["SHM.5STL", ...] }
-  if (pathname === '/my/delete-inventory' && req.method === 'POST') {
-    parseBody(req, function(err, data){
-      var dCode = (data.code || '').toUpperCase();
-      var session = getRequestSession(req, parsed);
-      if(!session || session.role !== 'admin' || session.subscriberCode !== dCode){
-        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
-      }
-      var skus = Array.isArray(data.skus) ? data.skus.map(function(s){ return (s||'').trim(); }).filter(Boolean) : [];
-      if(!skus.length){ res.writeHead(400); res.end(JSON.stringify({ error: 'No SKUs provided.' })); return; }
-      connectMongo(function(err, database){
-        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
-        database.collection('warehouse_inventory').deleteMany({ sku: { $in: skus } })
-          .then(function(r){ res.writeHead(200); res.end(JSON.stringify({ deleted: r.deletedCount, requested: skus.length })); })
-          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-      });
-    });
-    return;
-  }
-
   // ───────────────────────────────────────────────────────────
   // BULK WIPE — Warehouse Tool Listings
   // ───────────────────────────────────────────────────────────
@@ -5351,18 +5329,25 @@ var server = http.createServer(function(req, res) {
       res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
     }
     // Optional scope filters — caller sends ISO timestamps (computed client-side
-    // using browser local time so "yesterday" respects the user's timezone).
+    // using browser local time so "today"/"yesterday" respect the user's timezone)
+    // OR a specific SKU to look up (from scan/type input).
     var pSinceIso = parsed.query.sinceIso || null;
     var pUntilIso = parsed.query.untilIso || null;
+    var pSku = (parsed.query.sku || '').trim();
     connectMongo(function(err, database){
       if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
       // Base filter — never touch CSV imports or backfilled location-only stubs.
       var warehouseFilter = { code: pCode, source: { $ne: 'csv-import' }, backfilled: { $ne: true } };
-      // Layer on the createdAt bounds if provided.
-      var dateBounds = {};
-      if(pSinceIso){ try { dateBounds.$gte = new Date(pSinceIso); } catch(e){} }
-      if(pUntilIso){ try { dateBounds.$lte = new Date(pUntilIso); } catch(e){} }
-      if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+      // SKU lookup takes precedence (exact match) over date range
+      if(pSku){
+        warehouseFilter.sku = pSku;
+      } else {
+        // Layer on the createdAt bounds if provided.
+        var dateBounds = {};
+        if(pSinceIso){ try { dateBounds.$gte = new Date(pSinceIso); } catch(e){} }
+        if(pUntilIso){ try { dateBounds.$lte = new Date(pUntilIso); } catch(e){} }
+        if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+      }
 
       // Bump sample limit to 500 so the UI can show the full list for typical test batches.
       var SAMPLE_LIMIT = 500;
@@ -5390,7 +5375,7 @@ var server = http.createServer(function(req, res) {
             backfilled: results[2]
           },
           statusBreakdown: statusBreakdown,
-          scope: { sinceIso: pSinceIso, untilIso: pUntilIso },
+          scope: { sinceIso: pSinceIso, untilIso: pUntilIso, sku: pSku || null },
           sample: results[3] || [],
           sampleNote: results[3].length < results[0]
             ? 'Showing ' + results[3].length + ' most recent of ' + results[0] + ' total'
@@ -5421,6 +5406,7 @@ var server = http.createServer(function(req, res) {
       // Optional scope filters (must match the preview that was just shown).
       var wSinceIso = data.sinceIso || null;
       var wUntilIso = data.untilIso || null;
+      var wSku = (data.sku || '').trim();
       // When true, we also end the live eBay listing and delete the Amazon listing
       // before removing the MongoDB record. When false, DB-only (legacy behavior).
       var killLive = !!data.killLive;
@@ -5428,10 +5414,15 @@ var server = http.createServer(function(req, res) {
       connectMongo(function(err, database){
         if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
         var warehouseFilter = { code: wCode, source: { $ne: 'csv-import' }, backfilled: { $ne: true } };
-        var dateBounds = {};
-        if(wSinceIso){ try { dateBounds.$gte = new Date(wSinceIso); } catch(e){} }
-        if(wUntilIso){ try { dateBounds.$lte = new Date(wUntilIso); } catch(e){} }
-        if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+        // SKU lookup takes precedence over date range (matches preview behavior)
+        if(wSku){
+          warehouseFilter.sku = wSku;
+        } else {
+          var dateBounds = {};
+          if(wSinceIso){ try { dateBounds.$gte = new Date(wSinceIso); } catch(e){} }
+          if(wUntilIso){ try { dateBounds.$lte = new Date(wUntilIso); } catch(e){} }
+          if(dateBounds.$gte || dateBounds.$lte){ warehouseFilter.createdAt = dateBounds; }
+        }
 
         // ── DB-ONLY PATH (backwards-compatible, fast) ──
         if(!killLive){
