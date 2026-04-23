@@ -3995,41 +3995,71 @@ var server = http.createServer(function(req, res) {
       if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
       getSubscriber(code, function(err, sub){
         if(!sub){ res.writeHead(403); res.end(JSON.stringify({ error: 'Invalid code' })); return; }
-        // End eBay listing if live
-        if(data.ebayItemId){
-          var userToken = sub.ebayUserToken || USER_TOKEN;
-          var devId = sub.ebayDevId || DEV_ID;
-          var endXml = '<?xml version="1.0" encoding="utf-8"?>'
-            + '<EndItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-            + '<RequesterCredentials><eBayAuthToken>' + userToken + '</eBayAuthToken></RequesterCredentials>'
-            + '<ItemID>' + data.ebayItemId + '</ItemID>'
-            + '<EndingReason>NotAvailable</EndingReason>'
-            + '</EndItemRequest>';
-          var endOpts = {
-            hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-            headers: {
-              'X-EBAY-API-SITEID': '0', 'X-EBAY-API-COMPATIBILITY-LEVEL': '967',
-              'X-EBAY-API-CALL-NAME': 'EndItem', 'X-EBAY-API-DEV-NAME': devId,
-              'X-EBAY-API-APP-NAME': (sub.ebayClientId || CLIENT_ID),
-              'X-EBAY-API-CERT-NAME': (sub.ebayClientSecret || CLIENT_SECRET),
-              'Content-Type': 'text/xml', 'Content-Length': Buffer.byteLength(endXml)
-            }
-          };
-          var endReq = https.request(endOpts, function(endRes){
-            var d=''; endRes.on('data',function(c){d+=c;}); endRes.on('end',function(){ console.log('eBay end item:', d.substring(0,200)); });
-          });
-          endReq.on('error',function(){});
-          endReq.write(endXml); endReq.end();
-        }
-        // Mark as deleted in MongoDB and retire sequence
         connectMongo(function(err, database){
           if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB error' })); return; }
-          var query = data.itemId ? { _id: new (require('mongodb').ObjectId)(data.itemId) } : { code: code, sku: data.sku };
-          database.collection('warehouse_inventory').updateOne(query, {
-            $set: { status: 'deleted', deletedAt: new Date(), sequenceRetired: true }
-          })
-          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ success: true })); })
-          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          // Look up the record first so we know which platforms it was listed on.
+          var lookupQuery;
+          try {
+            lookupQuery = data.itemId
+              ? { _id: new (require('mongodb').ObjectId)(data.itemId) }
+              : { code: code, sku: data.sku };
+          } catch(e){ res.writeHead(400); res.end(JSON.stringify({ error: 'Invalid itemId' })); return; }
+
+          database.collection('warehouse_inventory').findOne(lookupQuery).then(function(record){
+            if(!record){ res.writeHead(404); res.end(JSON.stringify({ error: 'Item not found' })); return; }
+
+            var listed = record.listedOn || [];
+            var ebayItemId = data.ebayItemId || record.ebayItemId;
+            var asin = record.asin;
+            var sku = record.sku || data.sku;
+            var results = { ebay: 'not-listed', amazon: 'not-listed' };
+            var doEbay = (listed.indexOf('ebay') !== -1 || !!data.ebayItemId) && ebayItemId;
+            var doAmazon = listed.indexOf('amazon') !== -1 && asin;
+
+            function stepEbay(after){
+              if(!doEbay){ after(); return; }
+              endEbayListing(code, ebayItemId, function(endErr, endInfo){
+                if(endErr){ results.ebay = 'error: ' + endErr; }
+                else if(endInfo && endInfo.alreadyGone){ results.ebay = 'already-ended'; }
+                else { results.ebay = 'ended'; }
+                after();
+              });
+            }
+
+            function stepAmazon(after){
+              if(!doAmazon){ after(); return; }
+              getAmazonAccessToken(function(tokErr, accessToken){
+                if(tokErr){ results.amazon = 'error: token ' + tokErr; after(); return; }
+                var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+                var marketplaceId = sub.amazonMarketplaceId || AMAZON_MARKETPLACE_ID;
+                deleteAmazonListing(accessToken, sellerId, sku, marketplaceId, function(delErr, delInfo){
+                  if(delErr){ results.amazon = 'error: ' + delErr; }
+                  else if(delInfo && delInfo.alreadyGone){ results.amazon = 'already-gone'; }
+                  else { results.amazon = 'deleted'; }
+                  after();
+                });
+              });
+            }
+
+            function stepDb(after){
+              database.collection('warehouse_inventory').updateOne(lookupQuery, {
+                $set: { status: 'deleted', deletedAt: new Date(), sequenceRetired: true }
+              }).then(function(){ after(); }).catch(function(e){ results.dbError = e.message; after(); });
+            }
+
+            stepEbay(function(){
+              stepAmazon(function(){
+                stepDb(function(){
+                  res.writeHead(200); res.end(JSON.stringify({
+                    success: true,
+                    ebay: results.ebay,
+                    amazon: results.amazon,
+                    dbError: results.dbError
+                  }));
+                });
+              });
+            });
+          }).catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
         });
       });
     });
