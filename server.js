@@ -4013,8 +4013,12 @@ var server = http.createServer(function(req, res) {
             var asin = record.asin;
             var sku = record.sku || data.sku;
             var results = { ebay: 'not-listed', amazon: 'not-listed' };
+            // eBay: needs ItemID because EndItem API requires it (can't end by SKU).
+            // Amazon: only needs SKU — the DELETE endpoint is /items/{sellerId}/{sku}.
+            //   ASIN is a catalog identifier, not required for deletion. Using just
+            //   listedOn means we can still clean up records where asin wasn't saved.
             var doEbay = (listed.indexOf('ebay') !== -1 || !!data.ebayItemId) && ebayItemId;
-            var doAmazon = listed.indexOf('amazon') !== -1 && asin;
+            var doAmazon = listed.indexOf('amazon') !== -1 && sku;
 
             function stepEbay(after){
               if(!doEbay){ after(); return; }
@@ -4969,19 +4973,32 @@ var server = http.createServer(function(req, res) {
         database.collection('warehouse_inventory').findOne({ sku: data.sku })
         .then(function(existing){
           if(existing){ res.writeHead(200); res.end(JSON.stringify({ error: 'SKU already exists' })); return; }
+          // Save every field the client sends. Previously we only saved a subset
+          // which meant ebayItemId and asin were silently dropped — breaking the
+          // delete tool's platform-cleanup logic (it uses those IDs to call EndItem
+          // and DELETE against the platforms). Also save coverUrl so we can rebuild
+          // the Recent Items list with images on reload and so the image is
+          // available for future cleanup/reprint operations.
           var item = {
             code: code,
             sku: data.sku,
             isbn: data.isbn || '',
+            asin: data.asin || '',
+            ebayItemId: data.ebayItemId || '',
             title: data.title || '',
             author: data.author || '',
             publisher: data.publisher || '',
             year: data.year || '',
             format: data.format || '',
+            language: data.language || '',
+            pages: data.pages || '',
+            edition: data.edition || '',
+            series: data.series || '',
             condition: data.condition || 'Good',
             price: parseFloat(data.price) || 9.99,
             location: data.location || {},
             listedOn: data.listedOn || [],
+            coverUrl: data.coverUrl || '',
             status: 'active',
             createdAt: new Date()
           };
@@ -5655,7 +5672,9 @@ var server = http.createServer(function(req, res) {
 
                   var listed = it.listedOn || [];
                   var doEbay = listed.indexOf('ebay') !== -1 && it.ebayItemId;
-                  var doAmazon = listed.indexOf('amazon') !== -1 && it.asin;
+                  // Amazon DELETE only needs SKU (path is /items/{sellerId}/{sku}).
+                  // ASIN is a catalog identifier — not required — so don't gate on it.
+                  var doAmazon = listed.indexOf('amazon') !== -1 && it.sku;
 
                   function stepEbay(after){
                     if(!doEbay){ after(); return; }
