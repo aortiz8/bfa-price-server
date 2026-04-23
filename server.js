@@ -4594,21 +4594,32 @@ var server = http.createServer(function(req, res) {
 
           var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
           var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
+          var coverUrl = (data.coverUrl || '').trim();
+          var amazonAttributes = {
+            merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
+            condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
+            fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
+            purchasable_offer: [{
+              marketplace_id: marketplaceId,
+              currency: 'USD',
+              audience: 'ALL',
+              start_at: { value: new Date().toISOString() },
+              our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
+            }]
+          };
+          // Attach the cover image as a fallback — if Amazon's ASIN match finds the
+          // catalog entry, its catalog image wins. If the match fails (missing-info flag),
+          // this keeps the listing viable instead of "No image available."
+          if(coverUrl){
+            amazonAttributes.main_product_image_locator = [{
+              marketplace_id: marketplaceId,
+              media_location: coverUrl
+            }];
+          }
           var body = JSON.stringify({
-            productType: 'PRODUCT',
+            productType: 'ABIS_BOOK',
             requirements: 'LISTING_OFFER_ONLY',
-            attributes: {
-              merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
-              condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
-              fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
-              purchasable_offer: [{
-                marketplace_id: marketplaceId,
-                currency: 'USD',
-                audience: 'ALL',
-                start_at: { value: new Date().toISOString() },
-                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
-              }]
-            }
+            attributes: amazonAttributes
           });
           console.log('Amazon PUT body:', body);
           var opts = {
