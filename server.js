@@ -2198,30 +2198,83 @@ async function runSyncCycle(subscriberCode){
           continue;
         }
 
-        // End eBay listing
-        var endResult = await new Promise(function(resolve){
-          endEbayListing(subscriberCode, record.ebayItemId, function(err, info){
-            resolve({ err: err, info: info });
-          });
-        });
-        var endErr = endResult.err;
-        var endInfo = endResult.info || {};
+        // eBay-side cleanup. For single-qty listings (one eBay ItemID = one DB
+        // record) we EndItem the listing entirely. For multi-qty listings (one eBay
+        // ItemID shared by N records), we can't end the whole listing because the
+        // other sibling records are still for sale on Amazon and logically still
+        // available on eBay. Instead we ReviseItem to decrement Quantity by 1 and
+        // only EndItem when the last sibling is sold.
+        //
+        // Strategy: first mark this record sold (so the sibling count reflects
+        // reality), then count remaining unsold siblings. If 0 → EndItem. If N>0 →
+        // GetItem + ReviseItem with Quantity = N + QuantitySold (preserves eBay's
+        // own sold count, reduces the "available" count by 1).
+        await database.collection('warehouse_inventory').updateOne(
+          { code: subscriberCode, sku: sku },
+          { $set: { status: 'sold-amazon', soldAt: new Date(), soldOrderId: order.AmazonOrderId } }
+        );
 
-        if(endErr){
-          logSyncAction(subscriberCode, {
-            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
-            ebayItemId: record.ebayItemId, action: 'end-ebay-listing',
-            success: false, error: endErr, needsReview: true
+        var siblingCount = await database.collection('warehouse_inventory').countDocuments({
+          code: subscriberCode,
+          ebayItemId: record.ebayItemId,
+          status: { $nin: ['sold', 'sold-amazon', 'sold-ebay', 'deleted'] }
+        });
+
+        if(siblingCount === 0){
+          // Last copy — end the whole eBay listing.
+          var endResult = await new Promise(function(resolve){
+            endEbayListing(subscriberCode, record.ebayItemId, function(err, info){
+              resolve({ err: err, info: info });
+            });
           });
+          if(endResult.err){
+            logSyncAction(subscriberCode, {
+              sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+              ebayItemId: record.ebayItemId, action: 'end-ebay-listing',
+              success: false, error: endResult.err, needsReview: true
+            });
+          } else {
+            logSyncAction(subscriberCode, {
+              sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+              ebayItemId: record.ebayItemId, action: 'end-ebay-listing', success: true
+            });
+          }
         } else {
-          logSyncAction(subscriberCode, {
-            sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
-            ebayItemId: record.ebayItemId, action: 'end-ebay-listing', success: true
+          // Siblings remain — decrement eBay Quantity by 1. Read current state first
+          // so we preserve QuantitySold and only reduce the "available" count.
+          var qInfo = await new Promise(function(resolve){
+            getEbayItemQuantity(subscriberCode, record.ebayItemId, function(err, info){
+              resolve({ err: err, info: info });
+            });
           });
-          await database.collection('warehouse_inventory').updateOne(
-            { code: subscriberCode, sku: sku },
-            { $set: { status: 'sold-amazon', soldAt: new Date(), soldOrderId: order.AmazonOrderId } }
-          );
+          if(qInfo.err || !qInfo.info){
+            logSyncAction(subscriberCode, {
+              sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+              ebayItemId: record.ebayItemId, action: 'decrement-ebay-qty',
+              success: false, error: 'GetItem failed: ' + (qInfo.err || 'no data'), needsReview: true
+            });
+          } else {
+            var newEbayQty = siblingCount + qInfo.info.sold;
+            var revResult = await new Promise(function(resolve){
+              reviseEbayItemQuantity(subscriberCode, record.ebayItemId, newEbayQty, function(err){
+                resolve(err);
+              });
+            });
+            if(revResult){
+              logSyncAction(subscriberCode, {
+                sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+                ebayItemId: record.ebayItemId, action: 'decrement-ebay-qty',
+                success: false, error: 'ReviseItem failed: ' + revResult, needsReview: true
+              });
+            } else {
+              logSyncAction(subscriberCode, {
+                sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
+                ebayItemId: record.ebayItemId, action: 'decrement-ebay-qty',
+                success: true,
+                reason: 'Multi-qty listing: ' + siblingCount + ' sibling(s) remain, set eBay Quantity=' + newEbayQty + ' (was ' + qInfo.info.quantity + ', sold=' + qInfo.info.sold + ')'
+              });
+            }
+          }
         }
       }
     }
