@@ -2302,8 +2302,15 @@ async function runSyncCycle(subscriberCode){
 
       // eBay-only SKU prefixes — these books are listed only on eBay, never on Amazon.
       // Skip Amazon deletion entirely, log as clean success.
+      //   MX-*  Mexico-only inventory
+      //   UP-*  old program legacy prefix
+      //   0-*   old program legacy prefix (e.g. 0-A-159)
+      //   5-*   old program legacy prefix (e.g. 5-B-42)
+      // The warehouse tool generates SKUs like bfa.xxxx, so these prefixes can never
+      // collide with new tool-listed inventory — safe to treat as eBay-only.
       var skuUpper = (eo.sku || '').toUpperCase();
-      if(skuUpper.indexOf('MX-') === 0 || skuUpper.indexOf('UP-') === 0){
+      if(skuUpper.indexOf('MX-') === 0 || skuUpper.indexOf('UP-') === 0 ||
+         skuUpper.indexOf('0-') === 0 || skuUpper.indexOf('5-') === 0){
         logSyncAction(subscriberCode, {
           sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           action: 'skip', reason: 'eBay-only SKU (no Amazon twin)', success: true
