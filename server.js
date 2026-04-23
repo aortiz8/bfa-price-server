@@ -799,7 +799,13 @@ function uploadPicture(base64Image, userToken, devId, cb) {
     res.on('data', function(c) { data += c; });
     res.on('end', function() {
       var match = data.match(/<FullURL>(.*?)<\/FullURL>/);
-      if (match) { cb(null, match[1]); } else { cb('Upload failed'); }
+      if (match) { cb(null, match[1]); return; }
+      // Extract eBay's actual error so we can see WHY the upload failed
+      var errMatch = data.match(/<LongMessage>(.*?)<\/LongMessage>/);
+      var shortMatch = data.match(/<ShortMessage>(.*?)<\/ShortMessage>/);
+      var reason = (errMatch && errMatch[1]) || (shortMatch && shortMatch[1]) || 'no FullURL in response';
+      console.log('[uploadPicture] eBay rejected upload: ' + reason + ' — response sample: ' + data.substring(0, 300));
+      cb('Upload failed: ' + reason);
     });
   });
   req.on('error', function(e) { cb(e.message); });
@@ -809,17 +815,18 @@ function uploadPicture(base64Image, userToken, devId, cb) {
 
 // Download an image URL (e.g. Amazon catalog image) and upload it to eBay's image hosting.
 // Returns eBay's hosted URL so eBay's image fetcher doesn't have to touch Amazon.
-// Falls back to returning the original URL if download or upload fails.
+// Falls back to returning the upsized URL if download or upload fails (never the stale
+// original, because that's how we end up with <500px images that eBay rejects).
 function rehostCoverForEbay(imageUrl, userToken, devId, cb){
   if(!imageUrl){ cb(null, ''); return; }
   // eBay requires images ≥500px on the longest side. Amazon catalog thumbnails are
   // often 160-300px (e.g. "._SX300_.jpg"). Strip the size suffix to get the full-size
   // original — Amazon's image CDN serves these from the same path without the suffix.
-  // Pattern covers _SX300_, _SL1500_, _SR160,160_, _AC_UL200_, and chained variants.
   var upsized = imageUrl.replace(/\._[A-Z][A-Z0-9_,]*_(?=\.)/g, '');
+  console.log('[rehostCover] orig=' + imageUrl + ' upsized=' + upsized);
   try {
     var url = require('url').parse(upsized);
-  } catch(e){ cb(null, imageUrl); return; }
+  } catch(e){ console.log('[rehostCover] parse failed, using upsized fallback'); cb(null, upsized); return; }
   var lib = url.protocol === 'http:' ? require('http') : https;
   var imgReq = lib.request({
     hostname: url.hostname,
@@ -832,8 +839,8 @@ function rehostCoverForEbay(imageUrl, userToken, devId, cb){
     }
   }, function(r){
     if(r.statusCode !== 200){
-      // Couldn't fetch the image — fall back to original URL
-      cb(null, imageUrl);
+      console.log('[rehostCover] download failed status=' + r.statusCode + ' — falling back to upsized URL');
+      cb(null, upsized);
       return;
     }
     var chunks = [];
@@ -841,20 +848,23 @@ function rehostCoverForEbay(imageUrl, userToken, devId, cb){
     r.on('end', function(){
       try {
         var buf = Buffer.concat(chunks);
+        console.log('[rehostCover] downloaded ' + buf.length + ' bytes from Amazon');
         var b64 = buf.toString('base64');
         // Upload to eBay's hosted images
         uploadPicture(b64, userToken, devId, function(upErr, ebayUrl){
           if(upErr || !ebayUrl){
-            cb(null, imageUrl); // Fall back to original
+            console.log('[rehostCover] eBay upload FAILED err=' + upErr + ' — falling back to upsized Amazon URL');
+            cb(null, upsized); // Fall back to upsized (not the stale original)
             return;
           }
+          console.log('[rehostCover] eBay upload OK → ' + ebayUrl);
           cb(null, ebayUrl);
         });
-      } catch(e){ cb(null, imageUrl); }
+      } catch(e){ console.log('[rehostCover] concat/encode error: ' + e.message); cb(null, upsized); }
     });
   });
-  imgReq.on('error', function(){ cb(null, imageUrl); });
-  imgReq.setTimeout(15000, function(){ imgReq.destroy(); cb(null, imageUrl); });
+  imgReq.on('error', function(e){ console.log('[rehostCover] request error: ' + e.message + ' — using upsized fallback'); cb(null, upsized); });
+  imgReq.setTimeout(15000, function(){ imgReq.destroy(); console.log('[rehostCover] timeout — using upsized fallback'); cb(null, upsized); });
   imgReq.end();
 }
 
