@@ -840,7 +840,9 @@ function getImageDimensions(buf){
 }
 
 // Fetch an image URL and return the raw bytes via cb(err, buffer).
-function fetchImageBuffer(imageUrl, cb){
+// Follows HTTP redirects (OpenLibrary returns 302 to its actual CDN).
+function fetchImageBuffer(imageUrl, cb, redirectsLeft){
+  if(typeof redirectsLeft !== 'number') redirectsLeft = 5;
   var parsedUrl;
   try { parsedUrl = require('url').parse(imageUrl); } catch(e){ cb('parse'); return; }
   var lib = parsedUrl.protocol === 'http:' ? require('http') : https;
@@ -853,6 +855,20 @@ function fetchImageBuffer(imageUrl, cb){
       'Accept': 'image/jpeg,image/png,image/*'
     }
   }, function(r){
+    // Follow redirects (OpenLibrary does 302 → their actual CDN)
+    if([301, 302, 303, 307, 308].indexOf(r.statusCode) !== -1 && r.headers.location){
+      if(redirectsLeft <= 0){ cb('too many redirects'); return; }
+      // Drain the body then follow
+      r.resume();
+      var nextUrl = r.headers.location;
+      // Handle relative redirects (rare for images but safe to support)
+      if(nextUrl.indexOf('://') === -1){
+        nextUrl = parsedUrl.protocol + '//' + parsedUrl.hostname + (nextUrl.charAt(0) === '/' ? '' : '/') + nextUrl;
+      }
+      console.log('[fetchImage] ' + r.statusCode + ' redirect → ' + nextUrl);
+      fetchImageBuffer(nextUrl, cb, redirectsLeft - 1);
+      return;
+    }
     if(r.statusCode !== 200){ cb('HTTP ' + r.statusCode); return; }
     var chunks = [];
     r.on('data', function(c){ chunks.push(c); });
