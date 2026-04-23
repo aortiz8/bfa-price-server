@@ -4196,10 +4196,43 @@ var server = http.createServer(function(req, res) {
 
             function stepEbay(after){
               if(!doEbay){ after(); return; }
-              endEbayListing(code, ebayItemId, function(endErr, endInfo){
-                if(endErr){ results.ebay = 'error: ' + endErr; }
-                else if(endInfo && endInfo.alreadyGone){ results.ebay = 'already-ended'; }
-                else { results.ebay = 'ended'; }
+              // Sibling-aware eBay cleanup: if other active records share this
+              // ebayItemId (multi-qty listing), don't end the whole listing —
+              // decrement its Quantity by 1 instead. Only EndItem when this is
+              // the last sibling.
+              database.collection('warehouse_inventory').countDocuments({
+                code: code,
+                ebayItemId: ebayItemId,
+                _id: { $ne: record._id },  // exclude the record being deleted
+                status: { $nin: ['sold', 'sold-amazon', 'sold-ebay', 'deleted'] }
+              }).then(function(siblingCount){
+                if(siblingCount === 0){
+                  // Last copy — end whole listing
+                  endEbayListing(code, ebayItemId, function(endErr, endInfo){
+                    if(endErr){ results.ebay = 'error: ' + endErr; }
+                    else if(endInfo && endInfo.alreadyGone){ results.ebay = 'already-ended'; }
+                    else { results.ebay = 'ended'; }
+                    after();
+                  });
+                } else {
+                  // Siblings remain — decrement Quantity. Read current state
+                  // first so we preserve QuantitySold.
+                  getEbayItemQuantity(code, ebayItemId, function(getErr, info){
+                    if(getErr || !info){
+                      results.ebay = 'error: GetItem failed (' + (getErr || 'no data') + ')';
+                      after();
+                      return;
+                    }
+                    var newQty = siblingCount + info.sold;
+                    reviseEbayItemQuantity(code, ebayItemId, newQty, function(revErr){
+                      if(revErr){ results.ebay = 'error: ReviseItem failed (' + revErr + ')'; }
+                      else { results.ebay = 'qty-decremented (was ' + info.quantity + ', now ' + newQty + ', ' + siblingCount + ' sibling(s) remain)'; }
+                      after();
+                    });
+                  });
+                }
+              }).catch(function(e){
+                results.ebay = 'error: sibling check failed (' + e.message + ')';
                 after();
               });
             }
@@ -5170,11 +5203,15 @@ var server = http.createServer(function(req, res) {
     if(!code){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code' })); return; }
     connectMongo(function(err, database) {
       if (err || !database) { res.writeHead(200); res.end(JSON.stringify({ row: row, section: section, sequence: 1 })); return; }
-      // Find highest sequence number for this row+section
+      // Find highest sequence number for this row+section. Exclude deleted records
+      // so that deleting the NEWEST slot (the current max) frees that sequence for
+      // reuse on the next scan. Deleted slots BELOW the max stay as permanent gaps
+      // (next is still max+1). Sold records stay counted — we don't reuse sold slots.
       database.collection('warehouse_inventory').find({
         code: code,
         'location.row': row,
-        'location.section': section
+        'location.section': section,
+        status: { $ne: 'deleted' }
       }).sort({ 'location.sequence': -1 }).limit(1).toArray()
       .then(function(items){
         var nextSeq = items.length > 0 ? (items[0].location.sequence + 1) : 1;
@@ -5515,7 +5552,8 @@ var server = http.createServer(function(req, res) {
           database.collection('warehouse_inventory').find({
             code: code,
             createdAt: { $gte: utcStartDate, $lt: utcEndDate },
-            source: { $ne: 'csv-import' }  // Exclude bulk-imported records from daily listing counts
+            source: { $ne: 'csv-import' },  // Exclude bulk-imported records from daily listing counts
+            status: { $ne: 'deleted' }       // Exclude records deleted after listing
           }).sort({ createdAt: -1 }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
@@ -5570,7 +5608,8 @@ var server = http.createServer(function(req, res) {
           database.collection('warehouse_inventory').countDocuments({
             code: code,
             createdAt: { $gte: utcStartDate, $lt: utcEndDate },
-            source: { $ne: 'csv-import' }  // exclude bulk-imported records
+            source: { $ne: 'csv-import' },  // exclude bulk-imported records
+            status: { $ne: 'deleted' }       // exclude records deleted after listing
           })
         ]).then(function(results){
           var ebayTool = results[0] || 0;
@@ -5614,7 +5653,8 @@ var server = http.createServer(function(req, res) {
           database.collection('warehouse_inventory').find({
             code: code,
             createdAt: { $gte: utcStartDate, $lt: utcEndDate },
-            source: { $ne: 'csv-import' }  // Exclude bulk-imported records from weekly counts
+            source: { $ne: 'csv-import' },  // Exclude bulk-imported records from weekly counts
+            status: { $ne: 'deleted' }       // Exclude records deleted after listing
           }).sort({ createdAt: -1 }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
@@ -5667,7 +5707,8 @@ var server = http.createServer(function(req, res) {
           database.collection('warehouse_inventory').find({
             code: code,
             createdAt: { $gte: utcStartDate, $lt: utcEndDate },
-            source: { $ne: 'csv-import' }
+            source: { $ne: 'csv-import' },
+            status: { $ne: 'deleted' }
           }).toArray()
         ]).then(function(results){
           var ebayToolItems = (results[0] || []).map(function(l){ l.source = 'ebay-tool'; return l; });
@@ -5850,6 +5891,16 @@ var server = http.createServer(function(req, res) {
               getAmazonAccessToken(function(tokErr, accessToken){
                 if(tokErr) accessToken = null; // we'll still try the rest
 
+                // Batch-level state for sibling-aware eBay cleanup. Multiple records
+                // in this batch may share the same ebayItemId (multi-qty listings).
+                // We only want to hit eBay once per unique ItemID:
+                //   - batchIdSet: Set of _ids being deleted, used to exclude them
+                //     from the "external siblings" count on eBay cleanup
+                //   - handledEbayIds: ItemIDs already processed — subsequent records
+                //     sharing that ItemID get marked without redundant API calls
+                var batchIdSet = new Set(items.map(function(x){ return String(x._id); }));
+                var handledEbayIds = {};  // ebayItemId → result string to reuse
+
                 var results = [];
                 var idx = 0;
                 function processNext(){
@@ -5901,10 +5952,65 @@ var server = http.createServer(function(req, res) {
 
                   function stepEbay(after){
                     if(!doEbay){ after(); return; }
-                    endEbayListing(wCode, it.ebayItemId, function(endErr, endInfo){
-                      if(endErr){ itemResult.ebay = 'error: ' + endErr; }
-                      else if(endInfo && endInfo.alreadyGone){ itemResult.ebay = 'already-ended'; }
-                      else { itemResult.ebay = 'ended'; }
+                    // If another record in this batch already handled this ItemID
+                    // (multi-qty shared listing), reuse its result — don't hit eBay
+                    // again.
+                    if(handledEbayIds[it.ebayItemId]){
+                      itemResult.ebay = handledEbayIds[it.ebayItemId];
+                      after();
+                      return;
+                    }
+                    // Count siblings for this ItemID that are (a) still active and
+                    // (b) NOT in this delete batch. If 0, this delete empties the
+                    // listing — EndItem. Otherwise ReviseItem to decrement by the
+                    // number of copies being removed from this batch.
+                    database.collection('warehouse_inventory').countDocuments({
+                      code: wCode,
+                      ebayItemId: it.ebayItemId,
+                      _id: { $nin: Array.from(batchIdSet).map(function(s){ try { return new (require('mongodb').ObjectId)(s); } catch(e){ return s; } }) },
+                      status: { $nin: ['sold', 'sold-amazon', 'sold-ebay', 'deleted'] }
+                    }).then(function(externalSiblings){
+                      // Also count how many rows in THIS batch share this ItemID
+                      // (they're all being removed simultaneously).
+                      var inBatchWithSameId = items.filter(function(x){
+                        return x.ebayItemId === it.ebayItemId;
+                      }).length;
+
+                      if(externalSiblings === 0){
+                        // No external copies remain — end the whole listing.
+                        endEbayListing(wCode, it.ebayItemId, function(endErr, endInfo){
+                          var label;
+                          if(endErr){ label = 'error: ' + endErr; }
+                          else if(endInfo && endInfo.alreadyGone){ label = 'already-ended'; }
+                          else { label = 'ended'; }
+                          handledEbayIds[it.ebayItemId] = label;
+                          itemResult.ebay = label;
+                          after();
+                        });
+                      } else {
+                        // Decrement. New Quantity should only reflect the external
+                        // siblings (preserves eBay's own QuantitySold).
+                        getEbayItemQuantity(wCode, it.ebayItemId, function(getErr, info){
+                          if(getErr || !info){
+                            var label = 'error: GetItem failed (' + (getErr || 'no data') + ')';
+                            handledEbayIds[it.ebayItemId] = label;
+                            itemResult.ebay = label;
+                            after();
+                            return;
+                          }
+                          var newQty = externalSiblings + info.sold;
+                          reviseEbayItemQuantity(wCode, it.ebayItemId, newQty, function(revErr){
+                            var label;
+                            if(revErr){ label = 'error: ReviseItem failed (' + revErr + ')'; }
+                            else { label = 'qty-decremented (' + inBatchWithSameId + ' in batch, ' + externalSiblings + ' external remain, eBay Quantity ' + info.quantity + '→' + newQty + ')'; }
+                            handledEbayIds[it.ebayItemId] = label;
+                            itemResult.ebay = label;
+                            after();
+                          });
+                        });
+                      }
+                    }).catch(function(e){
+                      itemResult.ebay = 'error: sibling check failed (' + e.message + ')';
                       after();
                     });
                   }
