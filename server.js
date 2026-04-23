@@ -813,59 +813,124 @@ function uploadPicture(base64Image, userToken, devId, cb) {
   req.write(bodyBuffer); req.end();
 }
 
-// Download an image URL (e.g. Amazon catalog image) and upload it to eBay's image hosting.
-// Returns eBay's hosted URL so eBay's image fetcher doesn't have to touch Amazon.
-// Falls back to returning the upsized URL if download or upload fails (never the stale
-// original, because that's how we end up with <500px images that eBay rejects).
-function rehostCoverForEbay(imageUrl, userToken, devId, cb){
-  if(!imageUrl){ cb(null, ''); return; }
-  // eBay requires images ≥500px on the longest side. Amazon catalog thumbnails are
-  // often 160-300px (e.g. "._SX300_.jpg"). Strip the size suffix to get the full-size
-  // original — Amazon's image CDN serves these from the same path without the suffix.
-  var upsized = imageUrl.replace(/\._[A-Z][A-Z0-9_,]*_(?=\.)/g, '');
-  console.log('[rehostCover] orig=' + imageUrl + ' upsized=' + upsized);
-  try {
-    var url = require('url').parse(upsized);
-  } catch(e){ console.log('[rehostCover] parse failed, using upsized fallback'); cb(null, upsized); return; }
-  var lib = url.protocol === 'http:' ? require('http') : https;
-  var imgReq = lib.request({
-    hostname: url.hostname,
-    path: url.path,
+// Parse JPEG/PNG header to read image dimensions without a full decode.
+// Returns {width, height} or null if format is unrecognized / buffer too short.
+function getImageDimensions(buf){
+  if(!buf || buf.length < 24) return null;
+  // PNG: 89 50 4E 47 ... then IHDR at offset 16 (width=16-19, height=20-23)
+  if(buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47){
+    try { return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) }; } catch(e){ return null; }
+  }
+  // JPEG: FF D8 ... walk segments until we hit a Start-Of-Frame marker (FFC0-FFC3)
+  if(buf[0] === 0xFF && buf[1] === 0xD8){
+    var i = 2;
+    while(i < buf.length - 8){
+      if(buf[i] !== 0xFF){ i++; continue; }
+      var marker = buf[i+1];
+      if(marker >= 0xC0 && marker <= 0xC3){
+        try { return { height: buf.readUInt16BE(i+5), width: buf.readUInt16BE(i+7) }; } catch(e){ return null; }
+      }
+      var segLen;
+      try { segLen = buf.readUInt16BE(i+2); } catch(e){ break; }
+      if(segLen < 2) break;
+      i += 2 + segLen;
+    }
+  }
+  return null;
+}
+
+// Fetch an image URL and return the raw bytes via cb(err, buffer).
+function fetchImageBuffer(imageUrl, cb){
+  var parsedUrl;
+  try { parsedUrl = require('url').parse(imageUrl); } catch(e){ cb('parse'); return; }
+  var lib = parsedUrl.protocol === 'http:' ? require('http') : https;
+  var req = lib.request({
+    hostname: parsedUrl.hostname,
+    path: parsedUrl.path,
     method: 'GET',
     headers: {
-      // Amazon's image CDN returns faster/more reliably with a browser UA
       'User-Agent': 'Mozilla/5.0 (compatible; BFA-Platform)',
       'Accept': 'image/jpeg,image/png,image/*'
     }
   }, function(r){
-    if(r.statusCode !== 200){
-      console.log('[rehostCover] download failed status=' + r.statusCode + ' — falling back to upsized URL');
-      cb(null, upsized);
-      return;
-    }
+    if(r.statusCode !== 200){ cb('HTTP ' + r.statusCode); return; }
     var chunks = [];
     r.on('data', function(c){ chunks.push(c); });
-    r.on('end', function(){
-      try {
-        var buf = Buffer.concat(chunks);
-        console.log('[rehostCover] downloaded ' + buf.length + ' bytes from Amazon');
-        var b64 = buf.toString('base64');
-        // Upload to eBay's hosted images
-        uploadPicture(b64, userToken, devId, function(upErr, ebayUrl){
-          if(upErr || !ebayUrl){
-            console.log('[rehostCover] eBay upload FAILED err=' + upErr + ' — falling back to upsized Amazon URL');
-            cb(null, upsized); // Fall back to upsized (not the stale original)
-            return;
-          }
-          console.log('[rehostCover] eBay upload OK → ' + ebayUrl);
-          cb(null, ebayUrl);
-        });
-      } catch(e){ console.log('[rehostCover] concat/encode error: ' + e.message); cb(null, upsized); }
-    });
+    r.on('end', function(){ try { cb(null, Buffer.concat(chunks)); } catch(e){ cb(e.message); } });
   });
-  imgReq.on('error', function(e){ console.log('[rehostCover] request error: ' + e.message + ' — using upsized fallback'); cb(null, upsized); });
-  imgReq.setTimeout(15000, function(){ imgReq.destroy(); console.log('[rehostCover] timeout — using upsized fallback'); cb(null, upsized); });
-  imgReq.end();
+  req.on('error', function(e){ cb(e.message); });
+  req.setTimeout(15000, function(){ req.destroy(); cb('timeout'); });
+  req.end();
+}
+
+// Get a cover image for an eBay listing and host it on eBay's CDN. Tries sources
+// in order and picks the first that meets eBay's 500px-longest-side minimum:
+//   1. OpenLibrary -L (large, ~800px) by ISBN — usually the same publisher cover Amazon has
+//   2. Amazon's catalog image (upsized by stripping size suffix)
+// Falls back to the last attempted source URL if eBay upload fails.
+function rehostCoverForEbay(imageUrl, isbn, userToken, devId, cb){
+  if(!imageUrl && !isbn){ cb(null, ''); return; }
+
+  var amazonFull = imageUrl ? imageUrl.replace(/\._[A-Z][A-Z0-9_,]*_(?=\.)/g, '') : '';
+  var cleanIsbn = isbn ? String(isbn).replace(/[^0-9X]/gi, '') : '';
+  // default=false → OpenLibrary returns 404 instead of a 1x1 placeholder when cover missing
+  var openLibUrl = cleanIsbn ? ('https://covers.openlibrary.org/b/isbn/' + cleanIsbn + '-L.jpg?default=false') : null;
+
+  function uploadAndDone(buf, sourceUrl, sourceName){
+    var b64 = buf.toString('base64');
+    uploadPicture(b64, userToken, devId, function(upErr, ebayUrl){
+      if(upErr || !ebayUrl){
+        console.log('[rehostCover] eBay upload FAILED from ' + sourceName + ': ' + upErr + ' — falling back to source URL');
+        cb(null, sourceUrl);
+        return;
+      }
+      console.log('[rehostCover] uploaded from ' + sourceName + ' → ' + ebayUrl);
+      cb(null, ebayUrl);
+    });
+  }
+
+  function tryAmazon(){
+    if(!amazonFull){
+      console.log('[rehostCover] no Amazon URL available — returning empty (listing will be imageless)');
+      cb(null, '');
+      return;
+    }
+    fetchImageBuffer(amazonFull, function(err, buf){
+      if(err || !buf){
+        console.log('[rehostCover] Amazon fetch failed (' + err + ')');
+        cb(null, amazonFull); // return as-is so AddItem can at least try
+        return;
+      }
+      var dims = getImageDimensions(buf);
+      var longest = dims ? Math.max(dims.width, dims.height) : 0;
+      console.log('[rehostCover] Amazon image: ' + buf.length + ' bytes, dims=' + (dims ? dims.width + 'x' + dims.height : 'unknown'));
+      if(dims && longest < 500){
+        console.log('[rehostCover] Amazon image under 500px — eBay WILL reject. Uploading anyway.');
+      }
+      uploadAndDone(buf, amazonFull, 'Amazon');
+    });
+  }
+
+  if(openLibUrl){
+    fetchImageBuffer(openLibUrl, function(err, buf){
+      if(err || !buf || buf.length < 1000){
+        console.log('[rehostCover] OpenLibrary miss for ISBN ' + cleanIsbn + ' (' + (err || 'tiny response') + ') — trying Amazon');
+        tryAmazon();
+        return;
+      }
+      var dims = getImageDimensions(buf);
+      var longest = dims ? Math.max(dims.width, dims.height) : 0;
+      console.log('[rehostCover] OpenLibrary image: ' + buf.length + ' bytes, dims=' + (dims ? dims.width + 'x' + dims.height : 'unknown'));
+      if(dims && longest < 500){
+        console.log('[rehostCover] OpenLibrary image also under 500px — trying Amazon');
+        tryAmazon();
+        return;
+      }
+      uploadAndDone(buf, openLibUrl, 'OpenLibrary');
+    });
+  } else {
+    tryAmazon();
+  }
 }
 
 // ===================== REPRICER ENGINE =====================
@@ -4609,32 +4674,26 @@ var server = http.createServer(function(req, res) {
 
           var conditionMap2 = {'New':'new_new','Like New':'used_like_new','Very Good':'used_very_good','Good':'used_good','Acceptable':'used_acceptable'};
           var condition2 = conditionMap2[data.conditionLabel] || 'used_good';
-          var coverUrl = (data.coverUrl || '').trim();
-          var amazonAttributes = {
-            merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
-            condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
-            fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
-            purchasable_offer: [{
-              marketplace_id: marketplaceId,
-              currency: 'USD',
-              audience: 'ALL',
-              start_at: { value: new Date().toISOString() },
-              our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
-            }]
-          };
-          // Attach the cover image as a fallback — if Amazon's ASIN match finds the
-          // catalog entry, its catalog image wins. If the match fails (missing-info flag),
-          // this keeps the listing viable instead of "No image available."
-          if(coverUrl){
-            amazonAttributes.main_product_image_locator = [{
-              marketplace_id: marketplaceId,
-              media_location: coverUrl
-            }];
-          }
+          // Note: we don't send main_product_image_locator — Amazon's API ignores it for
+          // ABIS_BOOK (catalog image is used from the matched ASIN). Sending it produces
+          // a WARNING on every response. When ASIN match succeeds, Amazon's own catalog
+          // image is used. When it fails, the listing flags "missing info" and we'd need
+          // a different product type anyway.
           var body = JSON.stringify({
             productType: 'ABIS_BOOK',
             requirements: 'LISTING_OFFER_ONLY',
-            attributes: amazonAttributes
+            attributes: {
+              merchant_suggested_asin: [{ value: asin, marketplace_id: marketplaceId }],
+              condition_type: [{ value: condition2, marketplace_id: marketplaceId }],
+              fulfillment_availability: [{ fulfillment_channel_code: 'DEFAULT', quantity: 1 }],
+              purchasable_offer: [{
+                marketplace_id: marketplaceId,
+                currency: 'USD',
+                audience: 'ALL',
+                start_at: { value: new Date().toISOString() },
+                our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
+              }]
+            }
           });
           console.log('Amazon PUT body:', body);
           var opts = {
@@ -4685,10 +4744,11 @@ var server = http.createServer(function(req, res) {
         var conditionId = data.conditionId || 5000;
         var desc = cleanDescription(data.description || '');
 
-        // Build picture URLs — eBay requires at least 1 photo and can't fetch from Amazon's
-        // image CDN reliably (rejection "needs picture"). Rehost through our server → eBay's
-        // own picture hosting so eBay never has to touch Amazon.
-        rehostCoverForEbay(data.coverUrl || '', userToken, devId, function(rehostErr, effectiveCoverUrl){
+        // Build picture URLs — eBay requires at least 1 photo and requires ≥500px on
+        // the longest side. Amazon's catalog image is sometimes under 500px for older
+        // books. rehostCoverForEbay tries OpenLibrary (800+px) first using the ISBN,
+        // falls back to Amazon, then uploads the best one to eBay's picture hosting.
+        rehostCoverForEbay(data.coverUrl || '', data.isbn || '', userToken, devId, function(rehostErr, effectiveCoverUrl){
           var pictureXml = '';
           if(effectiveCoverUrl){
             pictureXml = '<PictureDetails><GalleryType>Gallery</GalleryType><PictureURL>' + esc(effectiveCoverUrl) + '</PictureURL></PictureDetails>';
