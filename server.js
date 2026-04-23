@@ -1,4 +1,4 @@
-\var https = require('https');
+var https = require('https');
 var http = require('http');
 var url = require('url');
 var crypto = require('crypto');
