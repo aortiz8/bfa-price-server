@@ -1,4 +1,4 @@
-var https = require('https');
+\var https = require('https');
 var http = require('http');
 var url = require('url');
 var crypto = require('crypto');
@@ -880,10 +880,12 @@ function fetchImageBuffer(imageUrl, cb, redirectsLeft){
 }
 
 // Get a cover image for an eBay listing and host it on eBay's CDN. Tries sources
-// in order and picks the first that meets eBay's 500px-longest-side minimum:
-//   1. OpenLibrary -L (large, ~800px) by ISBN — usually the same publisher cover Amazon has
-//   2. Amazon's catalog image (upsized by stripping size suffix)
-// Falls back to the last attempted source URL if eBay upload fails.
+// in order and uses the first that works:
+//   1. OpenLibrary -L (large, ~800px) by ISBN — usually same publisher cover as Amazon
+//   2. Amazon's catalog image (suffix stripped for full size)
+// If the resulting image is under eBay's 500px-longest-side minimum (common for
+// old/obscure books where publishers only uploaded small thumbnails), the URL is
+// re-fetched through images.weserv.nl which upscales to 1000px. Zero npm deps.
 function rehostCoverForEbay(imageUrl, isbn, userToken, devId, cb){
   if(!imageUrl && !isbn){ cb(null, ''); return; }
 
@@ -892,12 +894,12 @@ function rehostCoverForEbay(imageUrl, isbn, userToken, devId, cb){
   // default=false → OpenLibrary returns 404 instead of a 1x1 placeholder when cover missing
   var openLibUrl = cleanIsbn ? ('https://covers.openlibrary.org/b/isbn/' + cleanIsbn + '-L.jpg?default=false') : null;
 
-  function uploadAndDone(buf, sourceUrl, sourceName){
+  function uploadAndDone(buf, sourceName){
     var b64 = buf.toString('base64');
     uploadPicture(b64, userToken, devId, function(upErr, ebayUrl){
       if(upErr || !ebayUrl){
-        console.log('[rehostCover] eBay upload FAILED from ' + sourceName + ': ' + upErr + ' — falling back to source URL');
-        cb(null, sourceUrl);
+        console.log('[rehostCover] eBay upload FAILED from ' + sourceName + ': ' + upErr);
+        cb(null, '');
         return;
       }
       console.log('[rehostCover] uploaded from ' + sourceName + ' → ' + ebayUrl);
@@ -905,44 +907,57 @@ function rehostCoverForEbay(imageUrl, isbn, userToken, devId, cb){
     });
   }
 
-  function tryAmazon(){
-    if(!amazonFull){
-      console.log('[rehostCover] no Amazon URL available — returning empty (listing will be imageless)');
-      cb(null, '');
-      return;
-    }
-    fetchImageBuffer(amazonFull, function(err, buf){
-      if(err || !buf){
-        console.log('[rehostCover] Amazon fetch failed (' + err + ')');
-        cb(null, amazonFull); // return as-is so AddItem can at least try
-        return;
-      }
+  // Fetch src URL, returning a buffer that meets eBay's 500px minimum. If the
+  // source is too small, re-fetches through weserv.nl (free image proxy) with
+  // w=1000 fit=inside which upscales small images to 1000px longest side.
+  // onDone(buf, label) — buf is null if both direct + weserv fail.
+  function fetchAndEnsureEbayReady(srcUrl, name, onDone){
+    fetchImageBuffer(srcUrl, function(err, buf){
+      if(err || !buf){ console.log('[rehostCover] ' + name + ' direct fetch failed: ' + err); onDone(null); return; }
       var dims = getImageDimensions(buf);
       var longest = dims ? Math.max(dims.width, dims.height) : 0;
-      console.log('[rehostCover] Amazon image: ' + buf.length + ' bytes, dims=' + (dims ? dims.width + 'x' + dims.height : 'unknown'));
-      if(dims && longest < 500){
-        console.log('[rehostCover] Amazon image under 500px — eBay WILL reject. Uploading anyway.');
+      console.log('[rehostCover] ' + name + ' image: ' + buf.length + ' bytes, dims=' + (dims ? dims.width+'x'+dims.height : 'unknown'));
+      if(dims && longest >= 500){
+        onDone(buf, name);
+        return;
       }
-      uploadAndDone(buf, amazonFull, 'Amazon');
+      // Too small → upscale via weserv.nl. It accepts protocol-stripped URLs and
+      // follows redirects internally, so OpenLibrary's 302 chain is handled by them.
+      var stripped = srcUrl.replace(/^https?:\/\//, '');
+      var proxyUrl = 'https://images.weserv.nl/?url=' + encodeURIComponent(stripped) + '&w=1000&fit=inside&output=jpg';
+      console.log('[rehostCover] ' + name + ' under 500px — upscaling via weserv.nl');
+      fetchImageBuffer(proxyUrl, function(pErr, pBuf){
+        if(pErr || !pBuf){
+          console.log('[rehostCover] weserv upscale failed for ' + name + ': ' + pErr);
+          onDone(null);
+          return;
+        }
+        var pDims = getImageDimensions(pBuf);
+        var pLongest = pDims ? Math.max(pDims.width, pDims.height) : 0;
+        console.log('[rehostCover] weserv upscaled ' + name + ': ' + pBuf.length + ' bytes, dims=' + (pDims ? pDims.width+'x'+pDims.height : 'unknown'));
+        if(pDims && pLongest < 500){
+          console.log('[rehostCover] weserv returned image still under 500px — giving up on this source');
+          onDone(null);
+          return;
+        }
+        onDone(pBuf, name + ' via weserv');
+      });
+    });
+  }
+
+  function tryAmazon(){
+    if(!amazonFull){ console.log('[rehostCover] no Amazon URL and OpenLibrary failed — imageless listing'); cb(null, ''); return; }
+    fetchAndEnsureEbayReady(amazonFull, 'Amazon', function(buf, label){
+      if(!buf){ console.log('[rehostCover] all sources exhausted — imageless listing'); cb(null, ''); return; }
+      uploadAndDone(buf, label);
     });
   }
 
   if(openLibUrl){
-    fetchImageBuffer(openLibUrl, function(err, buf){
-      if(err || !buf || buf.length < 1000){
-        console.log('[rehostCover] OpenLibrary miss for ISBN ' + cleanIsbn + ' (' + (err || 'tiny response') + ') — trying Amazon');
-        tryAmazon();
-        return;
-      }
-      var dims = getImageDimensions(buf);
-      var longest = dims ? Math.max(dims.width, dims.height) : 0;
-      console.log('[rehostCover] OpenLibrary image: ' + buf.length + ' bytes, dims=' + (dims ? dims.width + 'x' + dims.height : 'unknown'));
-      if(dims && longest < 500){
-        console.log('[rehostCover] OpenLibrary image also under 500px — trying Amazon');
-        tryAmazon();
-        return;
-      }
-      uploadAndDone(buf, openLibUrl, 'OpenLibrary');
+    fetchAndEnsureEbayReady(openLibUrl, 'OpenLibrary', function(buf, label){
+      if(buf){ uploadAndDone(buf, label); return; }
+      console.log('[rehostCover] OpenLibrary path exhausted — trying Amazon');
+      tryAmazon();
     });
   } else {
     tryAmazon();
