@@ -1039,9 +1039,30 @@ function calcTargetFromOffers(offers, mySellerId, config){
   };
 }
 
-// Apply guards (floor, max drop, max increase, direction)
-// Returns { finalPrice, skipped, reason }
-function applyGuards(currentPrice, targetPrice, config){
+// Apply guards (floor, direction, 24h rolling drop/increase) to a proposed target.
+//
+// When isFirstPass is true (book has never been processed), the 24h guards are
+// SKIPPED — engine trusts the rules and converges to market in one shot.
+// Floor + direction always apply because those are absolute constraints, not
+// rate-limits.
+//
+// 24h ROLLING WINDOW LOGIC
+// ------------------------
+// The anchor price is the OLDEST `oldPrice` in priceChangeLog within the last
+// 24 hours. "Used %" is how far the current price has already dropped (or
+// risen) from that anchor. The proposed change is measured from the SAME
+// anchor, not from the current price. The guard blocks moves that would push
+// total-since-anchor past maxDrop24hPct / maxIncrease24hPct.
+//
+// If the log is empty or all entries are >24h old, we treat this as a fresh
+// window: anchor = current price, used = 0%.
+//
+// priceChangeLog = array of {at: Date, oldPrice: Number, newPrice: Number}
+// Pruning of old entries happens in the caller so applyGuards stays pure.
+//
+// Returns { finalPrice, skipped, reason, capped: 'drop'|'increase'|null,
+//           anchorPrice, windowUsedPct, proposedPct }
+function applyGuards(currentPrice, targetPrice, config, isFirstPass, priceChangeLog){
   var floor = config.floorPrice || 0;
   if(targetPrice < floor){
     targetPrice = floor;
@@ -1056,26 +1077,85 @@ function applyGuards(currentPrice, targetPrice, config){
   if(config.direction === 'up' && targetPrice < currentPrice){
     return { skipped: true, reason: 'Direction=up, target lower than current' };
   }
-  // Clamp by max drop / max increase
-  if(targetPrice < currentPrice){
-    var maxDrop = (config.maxDropPct || 0) / 100;
-    var minAllowed = currentPrice * (1 - maxDrop);
-    if(targetPrice < minAllowed){
-      targetPrice = Math.round(minAllowed * 100) / 100;
+
+  // 24h rolling window guard. Find anchor from priceChangeLog.
+  // Default: anchor = current price, used = 0% (fresh window scenario).
+  var nowMs = Date.now();
+  var windowMs = 24 * 60 * 60 * 1000;
+  var inWindow = (priceChangeLog || []).filter(function(e){
+    var at = e.at ? (e.at instanceof Date ? e.at.getTime() : new Date(e.at).getTime()) : 0;
+    return (nowMs - at) < windowMs;
+  });
+  // Oldest entry in window = first chronologically
+  inWindow.sort(function(a,b){
+    var aa = a.at instanceof Date ? a.at.getTime() : new Date(a.at).getTime();
+    var bb = b.at instanceof Date ? b.at.getTime() : new Date(b.at).getTime();
+    return aa - bb;
+  });
+  var anchorPrice = (inWindow.length > 0 && typeof inWindow[0].oldPrice === 'number')
+    ? inWindow[0].oldPrice
+    : currentPrice;
+
+  var windowUsedPct = 0;
+  var proposedPct = 0;
+  if(anchorPrice > 0){
+    windowUsedPct = ((anchorPrice - currentPrice) / anchorPrice) * 100;  // positive = drop, negative = rise
+    proposedPct   = ((anchorPrice - targetPrice)  / anchorPrice) * 100;
+  }
+
+  var capped = null;
+  if(!isFirstPass && anchorPrice > 0){
+    // DROP case: proposedPct > windowUsedPct (further drop from anchor)
+    if(targetPrice < currentPrice){
+      var dropLimit = config.maxDrop24hPct || 0;
+      if(proposedPct > dropLimit){
+        // Cap to the budget we have left. New target = anchor × (1 - dropLimit%)
+        var cappedPrice = Math.round(anchorPrice * (1 - dropLimit / 100) * 100) / 100;
+        // Never cap UP (if cappedPrice > currentPrice we can't drop at all — budget exhausted)
+        if(cappedPrice >= currentPrice){
+          return {
+            skipped: true,
+            reason: '24h drop budget exhausted (used ' + windowUsedPct.toFixed(2) + '% of ' + dropLimit + '% from anchor $' + anchorPrice.toFixed(2) + ')',
+            anchorPrice: anchorPrice, windowUsedPct: windowUsedPct, proposedPct: proposedPct
+          };
+        }
+        targetPrice = cappedPrice;
+        capped = 'drop';
+      }
     }
-  } else if(targetPrice > currentPrice){
-    var maxIncr = (config.maxIncreasePct || 0) / 100;
-    var maxAllowed = currentPrice * (1 + maxIncr);
-    if(targetPrice > maxAllowed){
-      targetPrice = Math.round(maxAllowed * 100) / 100;
+    // RISE case: proposedPct is negative, and |proposedPct| > |windowUsedPct| means rising above anchor
+    else if(targetPrice > currentPrice){
+      var riseLimit = config.maxIncrease24hPct || 0;
+      // For rises we measure rise-from-anchor as a positive number
+      var riseFromAnchor = ((targetPrice - anchorPrice) / anchorPrice) * 100;
+      if(riseFromAnchor > riseLimit){
+        var cappedPriceUp = Math.round(anchorPrice * (1 + riseLimit / 100) * 100) / 100;
+        if(cappedPriceUp <= currentPrice){
+          return {
+            skipped: true,
+            reason: '24h increase budget exhausted (anchor $' + anchorPrice.toFixed(2) + ', current already at or above cap $' + cappedPriceUp.toFixed(2) + ')',
+            anchorPrice: anchorPrice, windowUsedPct: windowUsedPct, proposedPct: proposedPct
+          };
+        }
+        targetPrice = cappedPriceUp;
+        capped = 'increase';
+      }
     }
   }
-  // After clamping, recheck floor
+
+  // After clamping, re-check floor
   if(targetPrice < floor) targetPrice = floor;
   if(targetPrice === currentPrice){
-    return { skipped: true, reason: 'After guards, no change needed' };
+    return { skipped: true, reason: 'After guards, no change needed',
+             anchorPrice: anchorPrice, windowUsedPct: windowUsedPct, proposedPct: proposedPct };
   }
-  return { finalPrice: targetPrice };
+  return {
+    finalPrice: targetPrice,
+    capped: capped,
+    anchorPrice: anchorPrice,
+    windowUsedPct: windowUsedPct,
+    proposedPct: proposedPct
+  };
 }
 
 // Fetch competing offers from Amazon SP-API Product Pricing for a given ASIN
@@ -1338,7 +1418,7 @@ async function runRepricerCycle(subscriberCode, singleSku){
     if(!sub){ console.log('[repricer] No sub found'); repricerRunning[subscriberCode] = false; return; }
     var config = Object.assign({
       enabled: false, dryRun: true, direction: 'both', floorPrice: 5.99,
-      maxDropPct: 15, maxIncreasePct: 20, cycleIntervalDays: 1, ebayDiscountPct: 15,
+      maxDrop24hPct: 10, maxIncrease24hPct: 20, cycleIntervalHours: 24, ebayDiscountPct: 15,
       conditionMatch: 'smart', undercutStrategy: 'penny', fulfillmentFilter: 'fbm-only',
       excludedSkus: []
     }, sub.repricer || {});
@@ -1369,6 +1449,29 @@ async function runRepricerCycle(subscriberCode, singleSku){
     var listings = await database.collection('warehouse_inventory').find(query).toArray();
 
     console.log('[repricer]', listings.length, 'listings to check for', subscriberCode);
+
+    // Mode transition: if this is a LIVE cycle, wipe simulatedPrice,
+    // lastRepriceAttempt, AND priceChangeLog on every SKU in scope. This makes
+    // the first live run a genuine first-pass (guards skipped) and the 24h
+    // rolling-window starts fresh. Skipped in dry-run to preserve the rehearsal.
+    if(!config.dryRun && listings.length){
+      var wipeQuery = {
+        code: subscriberCode,
+        status: { $nin: ['sold', 'sold-amazon', 'sold-ebay'] }
+      };
+      if(singleSku) wipeQuery.sku = singleSku;
+      await database.collection('warehouse_inventory').updateMany(wipeQuery, {
+        $unset: { simulatedPrice: '', lastRepriceAttempt: '', priceChangeLog: '' }
+      });
+      // Reflect the wipe in our in-memory listings so this cycle sees them as
+      // first-pass too (without re-fetching).
+      listings.forEach(function(l){
+        delete l.simulatedPrice;
+        delete l.lastRepriceAttempt;
+        delete l.priceChangeLog;
+      });
+      console.log('[repricer] Live mode: wiped simulatedPrice + lastRepriceAttempt + priceChangeLog on ' + listings.length + ' record(s) to force first-pass');
+    }
 
     // Get Amazon access token
     var accessToken = await new Promise(function(resolve, reject){
@@ -1425,8 +1528,9 @@ async function runRepricerCycle(subscriberCode, singleSku){
             configMatch: config.conditionMatch,
             configFulfillment: config.fulfillmentFilter,
             configUndercut: config.undercutStrategy,
-            configMaxDropPct: config.maxDropPct,
-            configMaxIncreasePct: config.maxIncreasePct,
+            configMaxDrop24hPct: config.maxDrop24hPct,
+            configMaxIncrease24hPct: config.maxIncrease24hPct,
+            configCycleIntervalHours: config.cycleIntervalHours,
             allowedConds: allowedConds,
             totalOffers: offers.length,
             offersAll: offers.slice(0, 30).map(function(o){
@@ -1453,30 +1557,120 @@ async function runRepricerCycle(subscriberCode, singleSku){
           continue;
         }
 
-        var currentPrice = parseFloat(listing.price) || 0;
-        var guards = applyGuards(currentPrice, result.targetPrice, config);
+        // ─── First-pass + simulated-price + 24h-log logic ───
+        // effectivePrice: the price we treat as "current" for guard math.
+        //   Live mode → always use real price (simulatedPrice is wiped at live
+        //   transition, see "mode transition" handling below).
+        //   Dry-run → use simulatedPrice if set (carries dry-run trail forward),
+        //   otherwise real price.
+        // isFirstPass: null lastRepriceAttempt means virgin SKU, 24h guards skipped.
+        // priceChangeLog: rolling history of actual changes. We prune entries
+        //   older than 24h here so applyGuards sees a clean window.
+        var realPrice = parseFloat(listing.price) || 0;
+        var simPrice = (typeof listing.simulatedPrice === 'number') ? listing.simulatedPrice : null;
+        var effectivePrice = (config.dryRun && simPrice !== null) ? simPrice : realPrice;
+        var isFirstPass = !listing.lastRepriceAttempt;
+
+        var nowMs = Date.now();
+        var windowMs = 24 * 60 * 60 * 1000;
+        var rawLog = Array.isArray(listing.priceChangeLog) ? listing.priceChangeLog : [];
+        var prunedLog = rawLog.filter(function(e){
+          var at = e.at ? (e.at instanceof Date ? e.at.getTime() : new Date(e.at).getTime()) : 0;
+          return (nowMs - at) < windowMs;
+        });
+        // If pruning changed the array (old entries existed), persist the pruned
+        // version so we don't have to re-prune forever.
+        var didPrune = prunedLog.length !== rawLog.length;
+
+        var guards = applyGuards(effectivePrice, result.targetPrice, config, isFirstPass, prunedLog);
         if(guards.skipped){
-          logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, currentPrice, result.reason + ' · ' + guards.reason, config.dryRun, true, cycleId, diag);
+          // Even when skipped, bump lastRepriceAttempt so the NEXT run treats this
+          // SKU as subsequent-pass. Persist simulatedPrice in dry-run. If we pruned
+          // old log entries, persist the cleaner log too.
+          var skipUpdates = { lastRepriceAttempt: new Date() };
+          if(config.dryRun) skipUpdates.simulatedPrice = effectivePrice;
+          if(didPrune) skipUpdates.priceChangeLog = prunedLog;
+          await database.collection('warehouse_inventory').updateOne(
+            { code: subscriberCode, sku: sku },
+            { $set: skipUpdates }
+          );
+          // Enrich the diagnostic payload with pass-tracking fields.
+          if(diag){
+            diag.firstPass = isFirstPass;
+            diag.effectivePriceUsed = effectivePrice;
+            diag.simulatedPriceBeforeRun = simPrice;
+            diag.anchorPrice = (typeof guards.anchorPrice === 'number') ? guards.anchorPrice : null;
+            diag.windowUsedPct = (typeof guards.windowUsedPct === 'number') ? guards.windowUsedPct : null;
+            diag.proposedPct = (typeof guards.proposedPct === 'number') ? guards.proposedPct : null;
+            diag.priceLogInWindow = prunedLog.length;
+          }
+          logRepriceHistory(subscriberCode, sku, 'amazon', effectivePrice, effectivePrice, result.reason + ' · ' + guards.reason, config.dryRun, true, cycleId, diag);
           skipped++;
           continue;
         }
 
         var finalAmazonPrice = guards.finalPrice;
+        // Enrich diagnostic with pass-tracking + guard outcome.
+        if(diag){
+          diag.firstPass = isFirstPass;
+          diag.effectivePriceUsed = effectivePrice;
+          diag.simulatedPriceBeforeRun = simPrice;
+          diag.cappedBy = guards.capped || null;
+          diag.anchorPrice = guards.anchorPrice;
+          diag.windowUsedPct = guards.windowUsedPct;
+          diag.proposedPct = guards.proposedPct;
+          diag.priceLogInWindow = prunedLog.length;
+        }
 
-        // Amazon patch
+        // Build the reason string so log rows tell the story. Examples:
+        //   "Lowest match $6.95 · firstPass (no 24h cap)"
+        //   "Lowest match $6.95 · Capped by maxDrop24hPct 10% · anchor $30.00"
+        var passLabel = isFirstPass ? 'firstPass (no 24h cap)' : null;
+        var capLabel = null;
+        if(guards.capped === 'drop') capLabel = 'Capped by maxDrop24hPct ' + (config.maxDrop24hPct||0) + '% · anchor $' + (guards.anchorPrice||0).toFixed(2);
+        else if(guards.capped === 'increase') capLabel = 'Capped by maxIncrease24hPct ' + (config.maxIncrease24hPct||0) + '% · anchor $' + (guards.anchorPrice||0).toFixed(2);
+        var reasonFull = result.reason
+          + (passLabel ? ' · ' + passLabel : '')
+          + (capLabel  ? ' · ' + capLabel  : '');
+
+        // New entry to push into the rolling log (regardless of dry vs live so
+        // dry-run rehearsals are also window-aware).
+        var logEntry = { at: new Date(), oldPrice: effectivePrice, newPrice: finalAmazonPrice };
+        var newLog = prunedLog.concat([logEntry]);
+
+        // Amazon patch (live only) + MongoDB update
         if(!config.dryRun){
           await new Promise(function(resolve){
             patchAmazonListingPrice(accessToken, sellerId, sku, finalAmazonPrice, marketplaceId, function(err){
               resolve();
             });
           });
-          // Update local listing record
+          // Live: actual price changed. Clear simulatedPrice (no longer relevant).
           await database.collection('warehouse_inventory').updateOne(
             { code: subscriberCode, sku: sku },
-            { $set: { price: finalAmazonPrice, lastRepriced: new Date() } }
+            {
+              $set: {
+                price: finalAmazonPrice,
+                lastRepriced: new Date(),
+                lastRepriceAttempt: new Date(),
+                priceChangeLog: newLog
+              },
+              $unset: { simulatedPrice: '' }
+            }
+          );
+        } else {
+          // Dry-run: bump lastRepriceAttempt, save simulatedPrice, and push the
+          // rehearsal entry into priceChangeLog so the 24h guard sees it next cycle.
+          await database.collection('warehouse_inventory').updateOne(
+            { code: subscriberCode, sku: sku },
+            { $set: {
+                simulatedPrice: finalAmazonPrice,
+                lastRepriceAttempt: new Date(),
+                priceChangeLog: newLog
+            } }
           );
         }
-        logRepriceHistory(subscriberCode, sku, 'amazon', currentPrice, finalAmazonPrice, result.reason, config.dryRun, false, cycleId, diag);
+        logRepriceHistory(subscriberCode, sku, 'amazon', effectivePrice, finalAmazonPrice, reasonFull, config.dryRun, false, cycleId, diag);
 
         // eBay mirror price — Amazon price × (1 - ebayDiscountPct/100)
         var ebayPrice = Math.round(finalAmazonPrice * (1 - (config.ebayDiscountPct || 0) / 100) * 100) / 100;
@@ -1527,17 +1721,21 @@ function startRepricerScheduler(){
           subs.forEach(function(sub){
             var cfg = sub.repricer || {};
             if(!cfg.enabled) return;
-            var intervalMs = (cfg.cycleIntervalDays || 1) * 86400000;
+            // Back-compat: accept old cycleIntervalDays config, convert to hours
+            var hours = (typeof cfg.cycleIntervalHours === 'number' && cfg.cycleIntervalHours > 0)
+              ? cfg.cycleIntervalHours
+              : ((typeof cfg.cycleIntervalDays === 'number' && cfg.cycleIntervalDays > 0) ? cfg.cycleIntervalDays * 24 : 24);
+            var intervalMs = hours * 60 * 60 * 1000;
             var lastStart = cfg.lastRunStartedAt ? new Date(cfg.lastRunStartedAt).getTime() : 0;
             if(Date.now() - lastStart >= intervalMs){
-              console.log('[repricer] Scheduler triggering cycle for', sub.code);
+              console.log('[repricer] Scheduler triggering cycle for', sub.code, '(every ' + hours + 'h)');
               runRepricerCycle(sub.code.toUpperCase());
             }
           });
         })
         .catch(function(){});
     });
-  }, 60 * 60 * 1000); // every 60 min
+  }, 15 * 60 * 1000); // every 15 min (so a 5h cycle interval triggers within ~5:15)
   console.log('[repricer] Scheduler started');
 }
 
@@ -6124,9 +6322,9 @@ var server = http.createServer(function(req, res) {
       dryRun: true,
       direction: 'both',              // 'down', 'up', 'both'
       floorPrice: 5.99,
-      maxDropPct: 15,
-      maxIncreasePct: 20,
-      cycleIntervalDays: 1,
+      maxDrop24hPct: 10,              // rolling 24h window cap on drops
+      maxIncrease24hPct: 20,          // rolling 24h window cap on increases
+      cycleIntervalHours: 24,         // how often the scheduler triggers a cycle
       ebayDiscountPct: 15,
       conditionMatch: 'smart',        // 'strict', 'smart', 'loose'
       undercutStrategy: 'penny',      // 'penny', 'match', 'percent1', 'percent2', 'percent5', 'dollar50', 'dollar100', 'second-lowest-penny'
@@ -6603,9 +6801,9 @@ var server = http.createServer(function(req, res) {
       if(typeof data.dryRun === 'boolean') update['repricer.dryRun'] = data.dryRun;
       if(['down','up','both'].indexOf(data.direction) !== -1) update['repricer.direction'] = data.direction;
       if(typeof data.floorPrice === 'number' && data.floorPrice >= 0) update['repricer.floorPrice'] = data.floorPrice;
-      if(typeof data.maxDropPct === 'number' && data.maxDropPct >= 0 && data.maxDropPct <= 100) update['repricer.maxDropPct'] = data.maxDropPct;
-      if(typeof data.maxIncreasePct === 'number' && data.maxIncreasePct >= 0 && data.maxIncreasePct <= 1000) update['repricer.maxIncreasePct'] = data.maxIncreasePct;
-      if(typeof data.cycleIntervalDays === 'number' && data.cycleIntervalDays > 0 && data.cycleIntervalDays <= 30) update['repricer.cycleIntervalDays'] = data.cycleIntervalDays;
+      if(typeof data.maxDrop24hPct === 'number' && data.maxDrop24hPct >= 0 && data.maxDrop24hPct <= 100) update['repricer.maxDrop24hPct'] = data.maxDrop24hPct;
+      if(typeof data.maxIncrease24hPct === 'number' && data.maxIncrease24hPct >= 0 && data.maxIncrease24hPct <= 1000) update['repricer.maxIncrease24hPct'] = data.maxIncrease24hPct;
+      if(typeof data.cycleIntervalHours === 'number' && data.cycleIntervalHours > 0 && data.cycleIntervalHours <= 720) update['repricer.cycleIntervalHours'] = data.cycleIntervalHours;
       if(typeof data.ebayDiscountPct === 'number' && data.ebayDiscountPct >= 0 && data.ebayDiscountPct <= 100) update['repricer.ebayDiscountPct'] = data.ebayDiscountPct;
       if(['strict','smart','loose'].indexOf(data.conditionMatch) !== -1) update['repricer.conditionMatch'] = data.conditionMatch;
       if(['penny','match','percent1','percent2','percent5','dollar50','dollar100','second-lowest-penny'].indexOf(data.undercutStrategy) !== -1) update['repricer.undercutStrategy'] = data.undercutStrategy;
@@ -6706,6 +6904,37 @@ var server = http.createServer(function(req, res) {
         lastRunCompletedAt: cfg.lastRunCompletedAt || null,
         lastRunSummary: cfg.lastRunSummary || null
       }));
+    });
+    return;
+  }
+
+  // POST /my/repricer/reset-sku — clear simulatedPrice + lastRepriceAttempt on
+  // one SKU, putting it back to "virgin" state for re-testing first-pass logic.
+  // Body: { code, sku }. Admin-only.
+  if (pathname === '/my/repricer/reset-sku' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var rsCode = (data.code || '').toUpperCase();
+      var rsSku = (data.sku || '').trim();
+      var rsSess = getRequestSession(req, parsed);
+      if(!rsSess || rsSess.role !== 'admin' || rsSess.subscriberCode !== rsCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      if(!rsSku){ res.writeHead(400); res.end(JSON.stringify({ error: 'SKU required' })); return; }
+      connectMongo(function(err, database){
+        if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('warehouse_inventory').updateOne(
+          { code: rsCode, sku: rsSku },
+          { $unset: { simulatedPrice: '', lastRepriceAttempt: '', priceChangeLog: '' } }
+        )
+          .then(function(r){
+            if(r.matchedCount === 0){ res.writeHead(404); res.end(JSON.stringify({ error: 'SKU not found in inventory' })); return; }
+            res.writeHead(200); res.end(JSON.stringify({
+              success: true,
+              message: 'SKU ' + rsSku + ' reset to virgin state (next run = first-pass, no cap)'
+            }));
+          })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+      });
     });
     return;
   }
