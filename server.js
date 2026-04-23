@@ -4740,6 +4740,12 @@ var server = http.createServer(function(req, res) {
           // a WARNING on every response. When ASIN match succeeds, Amazon's own catalog
           // image is used. When it fails, the listing flags "missing info" and we'd need
           // a different product type anyway.
+          //
+          // purchasable_offer: minimum fields only (marketplace_id, currency, our_price).
+          // We previously had audience:"ALL" which scopes the offer to a specific (B2B)
+          // audience per SP-API docs — that caused "Missing offer" on Seller Central
+          // because no default retail offer was registered. Default (no audience field)
+          // means the offer is a normal retail offer visible on the public listing.
           var body = JSON.stringify({
             productType: 'ABIS_BOOK',
             requirements: 'LISTING_OFFER_ONLY',
@@ -4750,8 +4756,6 @@ var server = http.createServer(function(req, res) {
               purchasable_offer: [{
                 marketplace_id: marketplaceId,
                 currency: 'USD',
-                audience: 'ALL',
-                start_at: { value: new Date().toISOString() },
                 our_price: [{ schedule: [{ value_with_tax: parseFloat(price) }] }]
               }]
             }
