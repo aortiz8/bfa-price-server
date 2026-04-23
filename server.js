@@ -812,8 +812,13 @@ function uploadPicture(base64Image, userToken, devId, cb) {
 // Falls back to returning the original URL if download or upload fails.
 function rehostCoverForEbay(imageUrl, userToken, devId, cb){
   if(!imageUrl){ cb(null, ''); return; }
+  // eBay requires images ≥500px on the longest side. Amazon catalog thumbnails are
+  // often 160-300px (e.g. "._SX300_.jpg"). Strip the size suffix to get the full-size
+  // original — Amazon's image CDN serves these from the same path without the suffix.
+  // Pattern covers _SX300_, _SL1500_, _SR160,160_, _AC_UL200_, and chained variants.
+  var upsized = imageUrl.replace(/\._[A-Z][A-Z0-9_,]*_(?=\.)/g, '');
   try {
-    var url = require('url').parse(imageUrl);
+    var url = require('url').parse(upsized);
   } catch(e){ cb(null, imageUrl); return; }
   var lib = url.protocol === 'http:' ? require('http') : https;
   var imgReq = lib.request({
