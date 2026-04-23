@@ -1209,6 +1209,98 @@ function reviseEbayListingPrice(subscriberCode, itemId, newPrice, cb){
   });
 }
 
+// Fetch current Quantity and QuantitySold on an existing eBay listing. Used by the
+// multi-qty merge path: when AddItem is rejected as duplicate for a book the seller
+// already has live, we need the current Quantity so we can bump it by N (copies being
+// added) via ReviseItem. Calls cb(err, { quantity, sold, available }).
+function getEbayItemQuantity(subscriberCode, itemId, cb){
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found'); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<ItemID>' + itemId + '</ItemID>'
+      +   '<IncludeItemSpecifics>false</IncludeItemSpecifics>'
+      + '</GetItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetItem',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        if(data.indexOf('<Ack>Success</Ack>') === -1 && data.indexOf('<Ack>Warning</Ack>') === -1){
+          var m = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+          cb(m ? m[1] : 'GetItem failed');
+          return;
+        }
+        var qtyMatch = data.match(/<Quantity>(\d+)<\/Quantity>/);
+        var soldMatch = data.match(/<QuantitySold>(\d+)<\/QuantitySold>/);
+        var quantity = qtyMatch ? parseInt(qtyMatch[1], 10) : 0;
+        var sold = soldMatch ? parseInt(soldMatch[1], 10) : 0;
+        cb(null, { quantity: quantity, sold: sold, available: Math.max(0, quantity - sold) });
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message); });
+    eReq.setTimeout(15000, function(){ eReq.destroy(); cb('Timeout'); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
+// Set the total Quantity on an existing eBay listing via ReviseItem. For multi-qty
+// merge: set newQuantity = currentQuantity + N (where N is how many new copies the
+// user is adding). eBay tracks sold separately (QuantitySold) so setting Quantity=10
+// on a listing with 2 already sold results in "8 available" to buyers.
+function reviseEbayItemQuantity(subscriberCode, itemId, newQuantity, cb){
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found'); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<ReviseItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<Item>'
+      +     '<ItemID>' + itemId + '</ItemID>'
+      +     '<Quantity>' + newQuantity + '</Quantity>'
+      +   '</Item>'
+      + '</ReviseItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'ReviseItem',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        if(data.indexOf('<Ack>Success</Ack>') !== -1 || data.indexOf('<Ack>Warning</Ack>') !== -1){
+          cb(null);
+        } else {
+          var m = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+          cb(m ? m[1] : 'eBay ReviseItem(quantity) failed');
+        }
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message); });
+    eReq.setTimeout(15000, function(){ eReq.destroy(); cb('Timeout'); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
 // Log a repricing event to MongoDB
 function logRepriceHistory(subscriberCode, sku, platform, oldPrice, newPrice, reason, dryRun, skipped, cycleId, diagnostics){
   connectMongo(function(err, database){
@@ -2166,30 +2258,59 @@ async function runSyncCycle(subscriberCode){
         continue;
       }
 
-      var record2 = await database.collection('warehouse_inventory').findOne({ code: subscriberCode, sku: eo.sku });
+      // Match eBay sale to a DB record. Direct SKU match for single-qty listings.
+      // For multi-qty listings, eBay attaches the same SKU to every unit sold (the
+      // SKU of the first copy we listed). So the second, third, etc. units all come
+      // in with eo.sku = bfa.aaaa while our DB has bfa.aaaa already marked sold and
+      // bfa.bbbb, bfa.cccc, ... still active but sharing the same ebayItemId.
+      // Strategy: look for an ACTIVE record with that SKU first. If none, fall back
+      // to looking up by ebayItemId + oldest unsold record (FIFO by shelf sequence).
+      var record2 = await database.collection('warehouse_inventory').findOne({
+        code: subscriberCode,
+        sku: eo.sku,
+        status: { $nin: ['sold', 'sold-amazon', 'sold-ebay', 'deleted'] }
+      });
+      if(!record2){
+        // Fall back to ItemID + FIFO. First find ANY record with this SKU (even
+        // sold) so we can pull its ebayItemId.
+        var skuAny = await database.collection('warehouse_inventory').findOne({
+          code: subscriberCode,
+          sku: eo.sku
+        });
+        if(skuAny && skuAny.ebayItemId){
+          record2 = await database.collection('warehouse_inventory').findOne({
+            code: subscriberCode,
+            ebayItemId: skuAny.ebayItemId,
+            status: { $nin: ['sold', 'sold-amazon', 'sold-ebay', 'deleted'] }
+          }, { sort: { 'location.sequence': 1 } });
+          if(record2){
+            console.log('[sync] eBay sale on SKU ' + eo.sku + ' matched by ItemID FIFO → DB SKU ' + record2.sku + ' (seq ' + (record2.location && record2.location.sequence) + ')');
+          }
+        }
+      }
       if(!record2){
         logSyncAction(subscriberCode, {
           sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
-          action: 'skip', reason: 'SKU not in warehouse_inventory', success: false
+          action: 'skip', reason: 'SKU not in warehouse_inventory (and no ItemID fallback match)', success: false
         });
         continue;
       }
 
       if(!record2.asin){
         logSyncAction(subscriberCode, {
-          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          sku: record2.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           action: 'skip', reason: 'No Amazon ASIN linked', success: true
         });
         await database.collection('warehouse_inventory').updateOne(
-          { code: subscriberCode, sku: eo.sku },
+          { code: subscriberCode, sku: record2.sku },
           { $set: { status: 'sold-ebay', soldAt: new Date(), soldOrderId: eo.orderId } }
         );
         continue;
       }
 
-      // Delete Amazon listing
+      // Delete Amazon listing (use record2.sku — may differ from eo.sku on multi-qty)
       var delResult = await new Promise(function(resolve){
-        deleteAmazonListing(accessToken, sellerId, eo.sku, marketplaceId, function(err, info){
+        deleteAmazonListing(accessToken, sellerId, record2.sku, marketplaceId, function(err, info){
           resolve({ err: err, info: info });
         });
       });
@@ -2198,7 +2319,7 @@ async function runSyncCycle(subscriberCode){
 
       if(delErr){
         logSyncAction(subscriberCode, {
-          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          sku: record2.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           asin: record2.asin, action: 'delete-amazon-listing',
           success: false, error: delErr, needsReview: true
         });
@@ -2206,7 +2327,7 @@ async function runSyncCycle(subscriberCode){
         // The 403 was misleading — GET confirmed the listing STILL EXISTS on Amazon.
         // This is a real failure that needs manual review.
         logSyncAction(subscriberCode, {
-          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          sku: record2.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           asin: record2.asin, action: 'delete-amazon-listing',
           success: false,
           error: 'Delete got 403 but listing still exists on Amazon',
@@ -2221,13 +2342,13 @@ async function runSyncCycle(subscriberCode){
           else if(delInfo.verified === false) verifiedTxt = ' · verify ' + (delInfo.verifyNote || 'skipped');
         }
         logSyncAction(subscriberCode, {
-          sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
+          sku: record2.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
           asin: record2.asin, action: 'delete-amazon-listing',
           success: true,
           reason: delInfo.alreadyGone ? ('Already removed from Amazon (' + delInfo.statusCode + ')' + verifiedTxt) : undefined
         });
         await database.collection('warehouse_inventory').updateOne(
-          { code: subscriberCode, sku: eo.sku },
+          { code: subscriberCode, sku: record2.sku },
           { $set: { status: 'sold-ebay', soldAt: new Date(), soldOrderId: eo.orderId } }
         );
       }
@@ -4815,6 +4936,9 @@ var server = http.createServer(function(req, res) {
         var returnPolicyId = sub.ebayReturnPolicyId || '129856789015';
         var conditionId = data.conditionId || 5000;
         var desc = cleanDescription(data.description || '');
+        // Listing quantity. For multi-qty FixedPriceItem, N identical copies share
+        // one listing. Default 1 for backwards compatibility with all existing callers.
+        var listingQty = Math.max(1, Math.min(99, parseInt(data.quantity, 10) || 1));
 
         // Build picture URLs — eBay requires at least 1 photo and requires ≥500px on
         // the longest side. Amazon's catalog image is sometimes under 500px for older
@@ -4836,6 +4960,7 @@ var server = http.createServer(function(req, res) {
           + '<Description><![CDATA[' + desc + ']]></Description>'
           + '<PrimaryCategory><CategoryID>261186</CategoryID></PrimaryCategory>'
           + '<StartPrice>' + parseFloat(data.price || 9.99).toFixed(2) + '</StartPrice>'
+          + '<Quantity>' + listingQty + '</Quantity>'
           + '<ConditionID>' + conditionId + '</ConditionID>'
           + '<Country>US</Country>'
           + '<Location>United States</Location>'
@@ -4866,6 +4991,7 @@ var server = http.createServer(function(req, res) {
           + '</Item>'
           + '</AddItemRequest>';
         console.log('Warehouse eBay XML ItemSpecifics:', xml.substring(xml.indexOf('<ItemSpecifics>'), xml.indexOf('</ItemSpecifics>') + 16));
+        console.log('Warehouse eBay Quantity=' + listingQty);
         var ebayOpts = {
           hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
           headers: {
@@ -4899,10 +5025,51 @@ var server = http.createServer(function(req, res) {
                 });
               }
               res.writeHead(200); res.end(JSON.stringify({ success: true, ebayItemId: ebayItemId }));
-            } else {
-              var errMsg = errMatch ? errMatch[1] : 'Unknown eBay error';
-              res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
+              return;
             }
+
+            // AddItem failed. Check whether it was a "duplicate listing" rejection,
+            // which happens when the seller already has an active listing for the
+            // same book. eBay embeds the existing ItemID inside the LongMessage in
+            // parens: "... you already have on eBay: Title (327118721621). We don't
+            // allow...". When that pattern matches, auto-merge: GetItem to read the
+            // current Quantity, ReviseItem to bump it by N. Return the existing
+            // ItemID so the client saves all N new MongoDB records against it.
+            var errMsg = errMatch ? errMatch[1] : 'Unknown eBay error';
+            var dupIdMatch = errMsg.match(/\((\d{9,})\)/);
+            var looksLikeDuplicate = /already have on eBay|identical items from the same seller/i.test(errMsg);
+            if(dupIdMatch && looksLikeDuplicate){
+              var existingItemId = dupIdMatch[1];
+              console.log('[list-ebay] Duplicate detected, attempting merge into existing ItemID ' + existingItemId + ' (adding ' + listingQty + ' to current qty)');
+              getEbayItemQuantity(code, existingItemId, function(getErr, info){
+                if(getErr || !info){
+                  console.log('[list-ebay] GetItem on existing listing failed: ' + getErr);
+                  res.writeHead(200); res.end(JSON.stringify({ error: errMsg + ' — auto-merge failed (GetItem): ' + (getErr || 'no data') }));
+                  return;
+                }
+                var newQty = info.quantity + listingQty;
+                console.log('[list-ebay] Existing qty=' + info.quantity + ' sold=' + info.sold + ' → setting to ' + newQty);
+                reviseEbayItemQuantity(code, existingItemId, newQty, function(revErr){
+                  if(revErr){
+                    console.log('[list-ebay] ReviseItem failed: ' + revErr);
+                    res.writeHead(200); res.end(JSON.stringify({ error: errMsg + ' — auto-merge failed (ReviseItem): ' + revErr }));
+                    return;
+                  }
+                  console.log('[list-ebay] Merge succeeded — existing ItemID ' + existingItemId + ' now has qty ' + newQty);
+                  res.writeHead(200); res.end(JSON.stringify({
+                    success: true,
+                    ebayItemId: existingItemId,
+                    mergedExisting: true,
+                    previousQuantity: info.quantity,
+                    newQuantity: newQty
+                  }));
+                });
+              });
+              return;
+            }
+
+            // Regular (non-duplicate) error — surface as-is.
+            res.writeHead(200); res.end(JSON.stringify({ error: errMsg }));
           });
         });
         ebayReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
