@@ -1124,7 +1124,7 @@ async function buildReceiptPdf(data){
     x: PAGE_W - MARGIN - itemNumW, y: cursorY - itemNumSize,
     size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
-  cursorY -= (itemNumSize + 10);
+  cursorY -= (itemNumSize + 18);  // bigger gap between corner numbers and location line
 
   // ── 2. LOCATION ROW — medium-large centered ──
   var locTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
@@ -1140,7 +1140,7 @@ async function buildReceiptPdf(data){
     y: cursorY - locSize,
     size: locSize, font: fontBold, color: rgb(0,0,0)
   });
-  cursorY -= (locSize + 10);
+  cursorY -= (locSize + 18);  // bigger gap between location line and barcode
 
   // ── 3. BARCODE/QR + SKU TEXT ──
   if(codeImageBytes){
@@ -1148,7 +1148,7 @@ async function buildReceiptPdf(data){
     var imgX = MARGIN + (CONTENT_W - codeImageW) / 2;
     var imgY = cursorY - codeImageH;
     page.drawImage(codeImage, { x: imgX, y: imgY, width: codeImageW, height: codeImageH });
-    cursorY = imgY - 2;
+    cursorY = imgY - 6;  // small gap between barcode and SKU text
   }
   var skuSize = 14;
   var skuW = fontMonoBold.widthOfTextAtSize(sku, skuSize);
@@ -1157,7 +1157,7 @@ async function buildReceiptPdf(data){
     y: cursorY - skuSize,
     size: skuSize, font: fontMonoBold, color: rgb(0,0,0)
   });
-  cursorY -= (skuSize + 6);
+  cursorY -= (skuSize + 14);  // bigger gap before divider (zone boundary)
 
   // ── 4. STRAIGHT LINE BREAK ──
   page.drawLine({
@@ -1165,7 +1165,7 @@ async function buildReceiptPdf(data){
     end: { x: PAGE_W - MARGIN, y: cursorY },
     thickness: 1, color: rgb(0,0,0)
   });
-  cursorY -= 10;
+  cursorY -= 16;  // bigger gap after divider (zone boundary)
 
   // ── 5. TITLE + AUTHOR ──
   titleLines.slice(0, 3).forEach(function(line){
@@ -1182,7 +1182,7 @@ async function buildReceiptPdf(data){
     });
     cursorY -= 14;
   }
-  cursorY -= 4;
+  cursorY -= 10;  // bigger gap between title/author block and meta rows
 
   // ── 6. META ROWS (label : value) ──
   // Labels left-aligned, values tab-stopped at 70pt from margin
@@ -1201,9 +1201,9 @@ async function buildReceiptPdf(data){
       x: valueX, y: cursorY - 9,
       size: 9, font: valFont, color: rgb(0,0,0)
     });
-    cursorY -= 13;
+    cursorY -= 15;  // +2 more breathing between meta rows
   });
-  cursorY -= 6;
+  cursorY -= 12;  // bigger gap between meta rows and price/condition
 
   // ── 7. PRICE + CONDITION ──
   page.drawText(priceStr, {
@@ -1219,7 +1219,7 @@ async function buildReceiptPdf(data){
       size: condSize, font: fontBold, color: rgb(0,0,0)
     });
   }
-  cursorY -= 32;
+  cursorY -= 40;  // bigger gap between price/condition block and employee/date footer
 
   // ── 8. Employee + date footer ──
   if(employeeName){
@@ -1227,7 +1227,7 @@ async function buildReceiptPdf(data){
       x: MARGIN, y: cursorY - 9,
       size: 9, font: fontReg, color: rgb(0.3, 0.3, 0.3)
     });
-    cursorY -= 12;
+    cursorY -= 14;
   }
   page.drawText(dateStr, {
     x: MARGIN, y: cursorY - 9,
@@ -1256,7 +1256,7 @@ async function buildReceiptPdf(data){
     x: PAGE_W - MARGIN - bItemW, y: by,
     size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
-  by += itemNumSize + 10;
+  by += itemNumSize + 18;  // bigger gap between corner numbers and location line
 
   // Location line (ROW: X  SEC: Y  #Z) — was where SKU used to be
   var bLocTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
@@ -1266,7 +1266,7 @@ async function buildReceiptPdf(data){
     y: by,
     size: locSize, font: fontBold, color: rgb(0,0,0)
   });
-  by += locSize + 6;
+  by += locSize + 18;  // bigger gap between location line and barcode
 
   // Barcode or QR code
   if(codeImageBytes){
@@ -1276,7 +1276,7 @@ async function buildReceiptPdf(data){
       x: bImgX, y: by,
       width: codeImageW, height: codeImageH
     });
-    by += codeImageH + 8;
+    by += codeImageH + 12;  // small gap between barcode and SKU text above it
   }
 
   // SKU text — now ABOVE the barcode (was below)
@@ -4913,6 +4913,33 @@ var server = http.createServer(function(req, res) {
           }).catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
         });
       });
+    });
+    return;
+  }
+
+  // ── Warehouse: Check if a SKU is available (globally unique) ──
+  // GET /warehouse/check-sku?code=X&sku=Y
+  // Returns { available: true/false }. Used by the warehouse tool before
+  // generating SKUs to guarantee uniqueness. Checks the entire
+  // warehouse_inventory collection (all subscribers, all statuses including
+  // sold/deleted) so we never reuse a SKU in the business's lifetime.
+  if (pathname === '/warehouse/check-sku' && req.method === 'GET') {
+    var cskCode = (parsed.query.code || '').toUpperCase();
+    var cskSku = (parsed.query.sku || '').trim();
+    if(!cskCode || !cskSku){
+      res.writeHead(400); res.end(JSON.stringify({ error: 'code and sku required' })); return;
+    }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+      // Global check — don't filter by code. SKUs must be unique across the
+      // entire system so Amazon/eBay APIs never collide.
+      database.collection('warehouse_inventory').findOne({ sku: cskSku }, { projection: { _id: 1 } })
+        .then(function(existing){
+          res.writeHead(200); res.end(JSON.stringify({ available: !existing }));
+        })
+        .catch(function(e){
+          res.writeHead(200); res.end(JSON.stringify({ error: e.message }));
+        });
     });
     return;
   }
