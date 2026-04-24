@@ -973,6 +973,293 @@ var repricerSchedulerInterval = null;
 // Sleep helper
 function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
 
+// ─── RECEIPT PDF GENERATION ───
+// Builds a thermal-receipt-sized PDF for warehouse listing slips.
+// Layout (top→bottom):
+//   1) Big location boxes (ROW / SECTION / #ITEM)
+//   2) Scannable barcode or QR code
+//   3) SKU text
+//   4) Business name + date
+//   5) Book title + author + meta (publisher/year/format/isbn)
+//   6) Price + condition
+//
+// Uses pdf-lib to draw the PDF and bwip-js to generate the scannable code as
+// a PNG image embedded in the PDF. Returns a Uint8Array of PDF bytes.
+//
+// Page: 80mm wide (226.77pt). Height auto-sized to content.
+async function buildReceiptPdf(data){
+  var pdfLib = require('pdf-lib');
+  var bwip = require('bwip-js');
+  var PDFDocument = pdfLib.PDFDocument;
+  var StandardFonts = pdfLib.StandardFonts;
+  var rgb = pdfLib.rgb;
+
+  // Page dimensions — 80mm (3.15") wide
+  var PAGE_W = 226.77;   // 80mm in points
+  var MARGIN = 8;        // left/right padding in points
+  var CONTENT_W = PAGE_W - 2 * MARGIN;
+
+  // Extract data with safe defaults
+  var sku = (data.sku || '').toString();
+  var codeType = (data.codeType === 'qr') ? 'qr' : 'barcode';
+  var loc = data.location || {};
+  var locRow = String(loc.row || '?');
+  var locSec = String(loc.section || '?');
+  var locSeq = String(loc.sequence || '?');
+  var book = data.book || {};
+  var title = String(book.title || '').slice(0, 200);
+  var author = String(book.author || '').slice(0, 100);
+  var publisher = String(book.publisher || '').slice(0, 60);
+  var year = String(book.year || '');
+  var format = String(book.format || '');
+  var isbn = String(book.isbn || '');
+  var priceStr = '$' + parseFloat(data.price || 0).toFixed(2);
+  var condition = String(data.condition || '');
+  var dateStr = String(data.dateStr || new Date().toLocaleDateString('en-US'));
+
+  // Generate barcode/QR as PNG bytes
+  var codeImageBytes = null;
+  var codeImageW = 0, codeImageH = 0;
+  try {
+    if(codeType === 'qr'){
+      codeImageBytes = await bwip.toBuffer({
+        bcid: 'qrcode',
+        text: sku,
+        scale: 4,
+        padding: 2,
+        includetext: false
+      });
+      codeImageW = 110; codeImageH = 110;
+    } else {
+      codeImageBytes = await bwip.toBuffer({
+        bcid: 'code128',
+        text: sku,
+        scale: 3,
+        height: 18,            // mm
+        includetext: false,
+        paddingwidth: 4,
+        paddingheight: 2
+      });
+      codeImageW = CONTENT_W - 20;
+      codeImageH = 60;
+    }
+  } catch(e){
+    // If barcode gen fails, continue without image (SKU text still printed)
+    console.error('[buildReceiptPdf] barcode gen failed:', e.message);
+  }
+
+  // Calculate total page height by summing section heights.
+  // We build the sections first, measure, then allocate the page.
+  var pdfDoc = await PDFDocument.create();
+  var fontReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  var fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  var fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
+  var fontMonoBold = await pdfDoc.embedFont(StandardFonts.CourierBold);
+
+  // Section heights (tuned by trial):
+  var hLocation = 70;   // big boxed row/section/# at top
+  var hCodeArea = codeImageBytes ? (codeImageH + 20) : 10;
+  var hSkuText = 22;
+  var hBizDate = 20;
+  var hBook = 80;       // title + author + 2x2 grid
+  var hPrice = 44;      // price + condition
+  var hFooter = 16;
+  var PAGE_H = hLocation + hCodeArea + hSkuText + hBizDate + hBook + hPrice + hFooter + 20;
+
+  var page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+
+  // pdf-lib uses bottom-left origin; we draw top-down by converting y
+  var cursorY = PAGE_H;   // top of page
+
+  // ── 1. LOCATION ROW (big boxes) ──
+  // 3 boxes side by side: ROW, SECTION, #ITEM
+  var locBoxH = 54;
+  var locBoxY = cursorY - locBoxH - 6;
+  var gap = 4;
+  var boxW = (CONTENT_W - 2 * gap) / 3;
+  var labels = [['ROW', locRow], ['SECTION', locSec], ['ITEM', '#' + locSeq]];
+  labels.forEach(function(pair, i){
+    var x = MARGIN + i * (boxW + gap);
+    // box border
+    page.drawRectangle({
+      x: x, y: locBoxY,
+      width: boxW, height: locBoxH,
+      borderColor: rgb(0,0,0), borderWidth: 2
+    });
+    // big value
+    var valTxt = pair[1];
+    var valSize = valTxt.length > 4 ? 18 : 24;
+    var valW = fontMonoBold.widthOfTextAtSize(valTxt, valSize);
+    page.drawText(valTxt, {
+      x: x + (boxW - valW)/2, y: locBoxY + 20,
+      size: valSize, font: fontMonoBold, color: rgb(0,0,0)
+    });
+    // label below
+    var lblW = fontBold.widthOfTextAtSize(pair[0], 7);
+    page.drawText(pair[0], {
+      x: x + (boxW - lblW)/2, y: locBoxY + 6,
+      size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.4)
+    });
+  });
+  // thick divider below location
+  page.drawLine({
+    start: { x: MARGIN, y: locBoxY - 4 },
+    end: { x: PAGE_W - MARGIN, y: locBoxY - 4 },
+    thickness: 2, color: rgb(0,0,0)
+  });
+  cursorY = locBoxY - 10;
+
+  // ── 2. BARCODE or QR ──
+  if(codeImageBytes){
+    var codeImage = await pdfDoc.embedPng(codeImageBytes);
+    var imgX = MARGIN + (CONTENT_W - codeImageW) / 2;
+    var imgY = cursorY - codeImageH - 4;
+    page.drawImage(codeImage, { x: imgX, y: imgY, width: codeImageW, height: codeImageH });
+    cursorY = imgY - 4;
+  }
+
+  // ── 3. SKU text (mono, large, centered) ──
+  var skuSize = 13;
+  var skuW = fontMonoBold.widthOfTextAtSize(sku, skuSize);
+  page.drawText(sku, {
+    x: MARGIN + (CONTENT_W - skuW) / 2,
+    y: cursorY - skuSize - 2,
+    size: skuSize, font: fontMonoBold, color: rgb(0,0,0)
+  });
+  cursorY -= (skuSize + 10);
+  // light divider
+  page.drawLine({
+    start: { x: MARGIN, y: cursorY },
+    end: { x: PAGE_W - MARGIN, y: cursorY },
+    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
+  });
+  cursorY -= 4;
+
+  // ── 4. Business + date ──
+  page.drawText('BOOKS FOR AGES', {
+    x: MARGIN, y: cursorY - 10,
+    size: 9, font: fontBold, color: rgb(0,0,0)
+  });
+  var dateW = fontMono.widthOfTextAtSize(dateStr, 8);
+  page.drawText(dateStr, {
+    x: PAGE_W - MARGIN - dateW, y: cursorY - 10,
+    size: 8, font: fontMono, color: rgb(0.5, 0.5, 0.5)
+  });
+  cursorY -= 16;
+  page.drawLine({
+    start: { x: MARGIN, y: cursorY },
+    end: { x: PAGE_W - MARGIN, y: cursorY },
+    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
+  });
+  cursorY -= 6;
+
+  // ── 5. BOOK INFO ──
+  // Title (wrapped if needed)
+  var titleLines = wrapText(title, fontBold, 11, CONTENT_W);
+  titleLines.slice(0, 2).forEach(function(line){
+    page.drawText(line, { x: MARGIN, y: cursorY - 11, size: 11, font: fontBold, color: rgb(0,0,0) });
+    cursorY -= 13;
+  });
+  cursorY -= 2;
+  // Author
+  if(author){
+    page.drawText(author, { x: MARGIN, y: cursorY - 9, size: 9, font: fontReg, color: rgb(0.4, 0.4, 0.4) });
+    cursorY -= 13;
+  }
+  // Meta grid (2x2): Publisher | Year / Format | ISBN
+  var halfW = CONTENT_W / 2;
+  function drawMetaPair(label, value, x, y){
+    page.drawText(label.toUpperCase(), { x: x, y: y, size: 6, font: fontBold, color: rgb(0.6, 0.6, 0.6) });
+    page.drawText(String(value).slice(0, 20), { x: x, y: y - 8, size: 8, font: fontReg, color: rgb(0,0,0) });
+  }
+  if(publisher || year){
+    drawMetaPair('Publisher', publisher || '—', MARGIN, cursorY - 6);
+    drawMetaPair('Year', year || '—', MARGIN + halfW, cursorY - 6);
+    cursorY -= 20;
+  }
+  if(format || isbn){
+    drawMetaPair('Format', format || '—', MARGIN, cursorY - 6);
+    drawMetaPair('ISBN', isbn || '—', MARGIN + halfW, cursorY - 6);
+    cursorY -= 20;
+  }
+  cursorY -= 2;
+  page.drawLine({
+    start: { x: MARGIN, y: cursorY },
+    end: { x: PAGE_W - MARGIN, y: cursorY },
+    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
+  });
+  cursorY -= 6;
+
+  // ── 6. PRICE + CONDITION ──
+  page.drawText('LISTED PRICE', {
+    x: MARGIN, y: cursorY - 7,
+    size: 6, font: fontBold, color: rgb(0.6, 0.6, 0.6)
+  });
+  page.drawText(priceStr, {
+    x: MARGIN, y: cursorY - 28,
+    size: 22, font: fontMonoBold, color: rgb(0,0,0)
+  });
+  if(condition){
+    // right-aligned condition pill
+    var condSize = 11;
+    var condW = fontBold.widthOfTextAtSize(condition, condSize);
+    var pillPad = 8;
+    var pillW = condW + pillPad * 2;
+    var pillH = 20;
+    var pillX = PAGE_W - MARGIN - pillW;
+    var pillY = cursorY - 24;
+    page.drawRectangle({
+      x: pillX, y: pillY,
+      width: pillW, height: pillH,
+      borderColor: rgb(0.6, 0.8, 0.6), borderWidth: 1,
+      color: rgb(0.94, 0.99, 0.94)
+    });
+    page.drawText(condition, {
+      x: pillX + pillPad, y: pillY + 5,
+      size: condSize, font: fontBold, color: rgb(0.1, 0.5, 0.2)
+    });
+  }
+  cursorY -= 36;
+
+  // ── 7. Footer ──
+  page.drawText('Row ' + locRow + ' · Section ' + locSec + ' · #' + locSeq, {
+    x: MARGIN, y: 8,
+    size: 7, font: fontReg, color: rgb(0.6, 0.6, 0.6)
+  });
+
+  var bytes = await pdfDoc.save();
+  return bytes;
+}
+
+// Word-wrap helper for PDF text. Splits `text` into lines that each fit
+// within `maxWidth` when rendered in the given font and size. Greedy algo.
+function wrapText(text, font, size, maxWidth){
+  var words = String(text || '').split(/\s+/);
+  var lines = [];
+  var cur = '';
+  for(var i = 0; i < words.length; i++){
+    var w = words[i];
+    if(!w) continue;
+    var trial = cur ? (cur + ' ' + w) : w;
+    if(font.widthOfTextAtSize(trial, size) <= maxWidth){
+      cur = trial;
+    } else {
+      if(cur) lines.push(cur);
+      // If single word itself overflows, truncate with ellipsis
+      if(font.widthOfTextAtSize(w, size) > maxWidth){
+        while(w.length > 1 && font.widthOfTextAtSize(w + '…', size) > maxWidth){
+          w = w.slice(0, -1);
+        }
+        cur = w + '…';
+      } else {
+        cur = w;
+      }
+    }
+  }
+  if(cur) lines.push(cur);
+  return lines;
+}
+
 // Normalize an Amazon condition string for comparison.
 // Amazon sometimes sends "very_good", "VeryGood", "Very Good" etc.
 // Our allowed-conditions list uses camelCase like "UsedVeryGood".
@@ -4903,12 +5190,35 @@ var server = http.createServer(function(req, res) {
   // For this iteration, we'll use contentType='raw_base64' with the HTML string
   //   base64'd. If the printer driver doesn't render it cleanly, we'll iterate
   //   to PDF conversion. User has been warned of possible layout issues.
+  // POST /warehouse/print-receipt — receive receipt data, build PDF, send to PrintNode.
+  //   Body: {
+  //     code,                   // subscriber code
+  //     sku,                    // "SHM.58H1" — used for barcode + shown as text
+  //     codeType,               // 'barcode' | 'qr'
+  //     location: { row, section, sequence },  // big boxed location at top
+  //     book: { title, author, publisher, year, format, isbn },
+  //     price,                  // "8.99" or 8.99
+  //     condition,              // "Good"
+  //     dateStr                 // "Apr 24, 2026" (formatted on client for tz consistency)
+  //   }
+  //
+  // Layout (per user spec):
+  //   1) Big location boxes at top (ROW / SECTION / #ITEM)
+  //   2) Scannable barcode or QR code right below
+  //   3) SKU text, business name, date
+  //   4) Book info, price, condition
+  //
+  // We use pdf-lib (no Chromium needed) + bwip-js (barcode/QR generator → PNG bytes).
+  // Page width: 80mm (226.77pt). Height grows to fit content; printer cuts at end.
   if (pathname === '/warehouse/print-receipt' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var prCode = (data.code || '').toUpperCase();
       if(!prCode){ res.writeHead(400); res.end(JSON.stringify({ error: 'code required' })); return; }
-      var html = data.html || '';
-      if(!html){ res.writeHead(400); res.end(JSON.stringify({ error: 'html field required' })); return; }
+
+      // Validate required receipt fields
+      var sku = (data.sku || '').trim();
+      if(!sku){ res.writeHead(400); res.end(JSON.stringify({ error: 'sku required' })); return; }
+
       getSubscriber(prCode, function(err, sub){
         if(err || !sub){ res.writeHead(200); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
         var apiKey = sub.printNodeApiKey || '';
@@ -4916,49 +5226,55 @@ var server = http.createServer(function(req, res) {
         if(!apiKey){ res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API key not configured. Set it in Settings.' })); return; }
         if(!printerId){ res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode printer not selected. Set it in Settings.' })); return; }
 
-        var auth = 'Basic ' + Buffer.from(apiKey + ':').toString('base64');
-        var payload = JSON.stringify({
-          printerId: parseInt(printerId, 10),
-          title: 'BFA Listing Slip',
-          contentType: 'raw_base64',
-          content: Buffer.from(html, 'utf-8').toString('base64'),
-          source: 'Books for Ages warehouse'
-        });
-        var opts = {
-          hostname: 'api.printnode.com',
-          path: '/printjobs',
-          method: 'POST',
-          headers: {
-            'Authorization': auth,
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(payload),
-            'Accept': 'application/json'
-          }
-        };
-        var pnReq = https.request(opts, function(r){
-          var body = '';
-          r.on('data', function(c){ body += c; });
-          r.on('end', function(){
-            try {
-              // PrintNode returns a job ID (integer) on success, or an error object
-              var parsed = body ? JSON.parse(body) : null;
-              if(r.statusCode >= 200 && r.statusCode < 300 && typeof parsed === 'number'){
-                res.writeHead(200); res.end(JSON.stringify({ success: true, jobId: parsed }));
-                return;
-              }
-              res.writeHead(200); res.end(JSON.stringify({
-                error: 'PrintNode error (HTTP ' + r.statusCode + '): ' + (parsed && parsed.message ? parsed.message : body.slice(0,200)),
-                status: r.statusCode
-              }));
-            } catch(e){
-              res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message + ' · body=' + body.slice(0,200) }));
-            }
+        // Build PDF
+        buildReceiptPdf(data).then(function(pdfBytes){
+          // Send to PrintNode as pdf_base64
+          var auth = 'Basic ' + Buffer.from(apiKey + ':').toString('base64');
+          var payload = JSON.stringify({
+            printerId: parseInt(printerId, 10),
+            title: 'BFA Listing Slip · ' + sku,
+            contentType: 'pdf_base64',
+            content: Buffer.from(pdfBytes).toString('base64'),
+            source: 'Books for Ages warehouse'
           });
+          var opts = {
+            hostname: 'api.printnode.com',
+            path: '/printjobs',
+            method: 'POST',
+            headers: {
+              'Authorization': auth,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+              'Accept': 'application/json'
+            }
+          };
+          var pnReq = https.request(opts, function(r){
+            var body = '';
+            r.on('data', function(c){ body += c; });
+            r.on('end', function(){
+              try {
+                var parsed = body ? JSON.parse(body) : null;
+                if(r.statusCode >= 200 && r.statusCode < 300 && typeof parsed === 'number'){
+                  res.writeHead(200); res.end(JSON.stringify({ success: true, jobId: parsed }));
+                  return;
+                }
+                res.writeHead(200); res.end(JSON.stringify({
+                  error: 'PrintNode error (HTTP ' + r.statusCode + '): ' + (parsed && parsed.message ? parsed.message : body.slice(0,200)),
+                  status: r.statusCode
+                }));
+              } catch(e){
+                res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message + ' · body=' + body.slice(0,200) }));
+              }
+            });
+          });
+          pnReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+          pnReq.setTimeout(15000, function(){ pnReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API timeout' })); });
+          pnReq.write(payload);
+          pnReq.end();
+        }).catch(function(buildErr){
+          console.error('[print-receipt] PDF build error:', buildErr);
+          res.writeHead(200); res.end(JSON.stringify({ error: 'PDF generation failed: ' + (buildErr.message || String(buildErr)) }));
         });
-        pnReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
-        pnReq.setTimeout(15000, function(){ pnReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API timeout' })); });
-        pnReq.write(payload);
-        pnReq.end();
       });
     });
     return;
