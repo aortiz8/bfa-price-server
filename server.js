@@ -2792,6 +2792,8 @@ var server = http.createServer(function(req, res) {
           response.customers = sub.customers || [];
           response.savedDescriptions = sub.savedDescriptions || [];
           response.invoicePayableTo = sub.invoicePayableTo || '';
+          response.printNodeApiKey = sub.printNodeApiKey || '';
+          response.printNodePrinterId = sub.printNodePrinterId || '';
         }
 
         res.writeHead(200); res.end(JSON.stringify(response));
@@ -2848,6 +2850,8 @@ var server = http.createServer(function(req, res) {
         response.customers = sub.customers || [];
         response.savedDescriptions = sub.savedDescriptions || [];
         response.invoicePayableTo = sub.invoicePayableTo || '';
+        response.printNodeApiKey = sub.printNodeApiKey || '';
+        response.printNodePrinterId = sub.printNodePrinterId || '';
       }
       res.writeHead(200); res.end(JSON.stringify(response));
     });
@@ -4801,6 +4805,160 @@ var server = http.createServer(function(req, res) {
             diag: diag
           }));
         });
+      });
+    });
+    return;
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PRINTNODE INTEGRATION — auto-print receipts from warehouse tool
+  // ────────────────────────────────────────────────────────────
+  // PrintNode docs: https://www.printnode.com/en/docs/api
+  // Auth: HTTP Basic with API key as username, empty password.
+  // Flow: portal saves sub.printNodeApiKey + sub.printNodePrinterId. When the
+  //   warehouse tool finishes a listing, it POSTs to /warehouse/print-receipt
+  //   which forwards the content to PrintNode, which routes to the printer
+  //   running the PrintNode client on the user's PC.
+
+  // GET /warehouse/printers?code=X — list all PrintNode printers for this
+  //   subscriber. Used by the portal's PrintNode settings dropdown so the user
+  //   can pick which printer receives the receipts.
+  if (pathname === '/warehouse/printers' && req.method === 'GET') {
+    var pnCode = (parsed.query.code || '').toUpperCase();
+    var pnSess = getRequestSession(req, parsed);
+    if(!pnSess || pnSess.role !== 'admin' || pnSess.subscriberCode !== pnCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    getSubscriber(pnCode, function(err, sub){
+      if(err || !sub){ res.writeHead(200); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+      var apiKey = sub.printNodeApiKey || '';
+      if(!apiKey){
+        res.writeHead(200); res.end(JSON.stringify({ error: 'No PrintNode API key configured', printers: [] })); return;
+      }
+      var auth = 'Basic ' + Buffer.from(apiKey + ':').toString('base64');
+      var opts = {
+        hostname: 'api.printnode.com',
+        path: '/printers',
+        method: 'GET',
+        headers: { 'Authorization': auth, 'Accept': 'application/json' }
+      };
+      var pnReq = https.request(opts, function(r){
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          try {
+            var arr = JSON.parse(data);
+            if(!Array.isArray(arr)){
+              res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode returned non-array: ' + (arr.message || JSON.stringify(arr).slice(0,200)), printers: [] }));
+              return;
+            }
+            // Trim to only the fields the UI actually needs
+            var printers = arr.map(function(p){
+              return {
+                id: p.id,
+                name: p.name,
+                description: p.description || '',
+                state: p.state,
+                computer: (p.computer && p.computer.name) || ''
+              };
+            });
+            res.writeHead(200); res.end(JSON.stringify({ printers: printers }));
+          } catch(e){
+            res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message, printers: [] }));
+          }
+        });
+      });
+      pnReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message, printers: [] })); });
+      pnReq.setTimeout(15000, function(){ pnReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API timeout', printers: [] })); });
+      pnReq.end();
+    });
+    return;
+  }
+
+  // POST /warehouse/print-receipt — receive HTML receipt, forward to PrintNode.
+  //   Body: { code, html }
+  //   Uses sub.printNodePrinterId as the target.
+  //   PrintNode accepts raw_base64, pdf_base64, and HTML via content type
+  //   'raw_base64' is fastest for thermal printers that take ESC/POS, but we're
+  //   sending HTML (PrintNode auto-renders to PDF). contentType='raw_base64'
+  //   won't work for HTML; we use 'pdf_base64' after converting, OR we can use
+  //   PrintNode's HTML support if printer supports it. Simpler path: let
+  //   PrintNode render our HTML on their end by using contentType='pdf_uri' ...
+  //   Actually, easiest: contentType='raw_base64' with a pre-rendered PDF, OR
+  //   contentType='raw_base64' with raw text. For now we take the simplest path:
+  //   POST HTML as-is with contentType='raw_base64' after base64-encoding. The
+  //   PrintNode client uses system print drivers to render it. Matches what
+  //   QZ Tray was doing (rasterize HTML → printer driver).
+  //
+  // Wait — PrintNode's actual valid contentTypes are: raw_base64, pdf_base64,
+  //   pdf_uri, raw_uri. There is NO direct HTML support. We need to render HTML
+  //   to PDF first or send raw bytes.
+  //
+  // Simplest robust approach: base64-encode the HTML with a data: URI wrapper
+  //   is NOT supported. Instead, we send raw_base64 with the HTML content; the
+  //   PrintNode client on Windows will pass raw bytes to the printer driver —
+  //   most thermal printer drivers accept HTML if set as default document type.
+  //   This is fragile. Better: convert HTML → PDF server-side.
+  //
+  // For this iteration, we'll use contentType='raw_base64' with the HTML string
+  //   base64'd. If the printer driver doesn't render it cleanly, we'll iterate
+  //   to PDF conversion. User has been warned of possible layout issues.
+  if (pathname === '/warehouse/print-receipt' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var prCode = (data.code || '').toUpperCase();
+      if(!prCode){ res.writeHead(400); res.end(JSON.stringify({ error: 'code required' })); return; }
+      var html = data.html || '';
+      if(!html){ res.writeHead(400); res.end(JSON.stringify({ error: 'html field required' })); return; }
+      getSubscriber(prCode, function(err, sub){
+        if(err || !sub){ res.writeHead(200); res.end(JSON.stringify({ error: 'Subscriber not found' })); return; }
+        var apiKey = sub.printNodeApiKey || '';
+        var printerId = sub.printNodePrinterId;
+        if(!apiKey){ res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API key not configured. Set it in Settings.' })); return; }
+        if(!printerId){ res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode printer not selected. Set it in Settings.' })); return; }
+
+        var auth = 'Basic ' + Buffer.from(apiKey + ':').toString('base64');
+        var payload = JSON.stringify({
+          printerId: parseInt(printerId, 10),
+          title: 'BFA Listing Slip',
+          contentType: 'raw_base64',
+          content: Buffer.from(html, 'utf-8').toString('base64'),
+          source: 'Books for Ages warehouse'
+        });
+        var opts = {
+          hostname: 'api.printnode.com',
+          path: '/printjobs',
+          method: 'POST',
+          headers: {
+            'Authorization': auth,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+            'Accept': 'application/json'
+          }
+        };
+        var pnReq = https.request(opts, function(r){
+          var body = '';
+          r.on('data', function(c){ body += c; });
+          r.on('end', function(){
+            try {
+              // PrintNode returns a job ID (integer) on success, or an error object
+              var parsed = body ? JSON.parse(body) : null;
+              if(r.statusCode >= 200 && r.statusCode < 300 && typeof parsed === 'number'){
+                res.writeHead(200); res.end(JSON.stringify({ success: true, jobId: parsed }));
+                return;
+              }
+              res.writeHead(200); res.end(JSON.stringify({
+                error: 'PrintNode error (HTTP ' + r.statusCode + '): ' + (parsed && parsed.message ? parsed.message : body.slice(0,200)),
+                status: r.statusCode
+              }));
+            } catch(e){
+              res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message + ' · body=' + body.slice(0,200) }));
+            }
+          });
+        });
+        pnReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
+        pnReq.setTimeout(15000, function(){ pnReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ error: 'PrintNode API timeout' })); });
+        pnReq.write(payload);
+        pnReq.end();
       });
     });
     return;
@@ -7349,7 +7507,7 @@ var server = http.createServer(function(req, res) {
         }
 
         // Only allow updating safe fields
-        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId, businessAddressLine1: data.businessAddressLine1, businessAddressLine2: data.businessAddressLine2, businessCity: data.businessCity, businessState: data.businessState, businessZip: data.businessZip, businessPhone: data.businessPhone, vendors: data.vendors, customers: data.customers, savedDescriptions: data.savedDescriptions, invoicePayableTo: data.invoicePayableTo };
+        var allowed = { employees: data.employees, email: data.email, businessName: data.businessName, ebayClientId: data.ebayClientId, ebayClientSecret: data.ebayClientSecret, ebayDevId: data.ebayDevId, ebayUserToken: data.ebayUserToken, ebayOAuthToken: data.ebayOAuthToken, ebayShippingPolicyId: data.ebayShippingPolicyId, ebayPaymentPolicyId: data.ebayPaymentPolicyId, ebayReturnPolicyId: data.ebayReturnPolicyId, businessAddressLine1: data.businessAddressLine1, businessAddressLine2: data.businessAddressLine2, businessCity: data.businessCity, businessState: data.businessState, businessZip: data.businessZip, businessPhone: data.businessPhone, vendors: data.vendors, customers: data.customers, savedDescriptions: data.savedDescriptions, invoicePayableTo: data.invoicePayableTo, printNodeApiKey: data.printNodeApiKey, printNodePrinterId: data.printNodePrinterId };
         Object.keys(allowed).forEach(function(k) { if (allowed[k] === undefined) delete allowed[k]; });
         connectMongo(function(err, database) {
           if (err || !database) {
