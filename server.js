@@ -1224,18 +1224,29 @@ async function buildReceiptPdf(data){
 
   // ── 9. BOTTOM LOCATION ZONE (duplicate of top, NOT rotated) ──
   // So worker can see location info at both ends of the slip without flipping.
-  // Draws at fixed position from bottom of page, leaving whitespace between
-  // this and section 8 above.
-  var bottomY = 12; // distance from bottom edge of page
-
-  // Compute heights we need to stack from bottom up:
-  //   SKU text (~14pt) → barcode/QR (codeImageH) → location line (~locSize)
-  //   → gap → item# corners (~itemNumSize)
+  // Item # corners are at the VERY bottom edge of the page (last line),
+  // with SKU/barcode/location above them, and whitespace above that zone.
   //
-  // We'll position each element at decreasing Y as we go UP from bottom.
-  var by = bottomY;
+  // Stacked from bottom up:
+  //   1) #NN in both corners (at very bottom edge)
+  //   2) SKU text (mono)
+  //   3) Barcode or QR code
+  //   4) Location line "ROW: X  SEC: Y  #Z"
+  var by = 12; // distance from bottom edge, grows upward
 
-  // SKU text (bottom-most element)
+  // Item # in both corners (BIG) — VERY BOTTOM
+  var bItemW = fontBold.widthOfTextAtSize(itemNumTxt, itemNumSize);
+  page.drawText(itemNumTxt, {
+    x: MARGIN, y: by,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
+  });
+  page.drawText(itemNumTxt, {
+    x: PAGE_W - MARGIN - bItemW, y: by,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
+  });
+  by += itemNumSize + 10;
+
+  // SKU text
   var bSkuSize = 14;
   var bSkuW = fontMonoBold.widthOfTextAtSize(sku, bSkuSize);
   page.drawText(sku, {
@@ -1263,18 +1274,6 @@ async function buildReceiptPdf(data){
     x: MARGIN + (CONTENT_W - bLocW) / 2,
     y: by,
     size: locSize, font: fontBold, color: rgb(0,0,0)
-  });
-  by += locSize + 8;
-
-  // Item # in both corners (BIG)
-  var bItemW = fontBold.widthOfTextAtSize(itemNumTxt, itemNumSize);
-  page.drawText(itemNumTxt, {
-    x: MARGIN, y: by,
-    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
-  });
-  page.drawText(itemNumTxt, {
-    x: PAGE_W - MARGIN - bItemW, y: by,
-    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
 
   var bytes = await pdfDoc.save();
