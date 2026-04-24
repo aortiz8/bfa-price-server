@@ -973,6 +973,17 @@ var repricerSchedulerInterval = null;
 // Sleep helper
 function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
 
+// Normalize an Amazon condition string for comparison.
+// Amazon sometimes sends "very_good", "VeryGood", "Very Good" etc.
+// Our allowed-conditions list uses camelCase like "UsedVeryGood".
+// Stripping underscores, spaces, and lowercasing makes all forms comparable.
+//   "Usedvery_good" → "usedverygood"
+//   "UsedVeryGood"  → "usedverygood"
+//   "Used Very Good" → "usedverygood"
+function normalizeCondition(s){
+  return (s || '').toString().toLowerCase().replace(/[\s_\-]/g, '');
+}
+
 // Build the list of allowed conditions given "my" condition + match mode
 function allowedConditionsFor(myCondition, matchMode){
   var c = (myCondition || '').toLowerCase();
@@ -1513,10 +1524,12 @@ async function runRepricerCycle(subscriberCode, singleSku){
           });
         });
 
-        // Filter by allowed conditions
+        // Filter by allowed conditions. Use normalizeCondition to handle
+        // Amazon's inconsistent formatting (e.g. "Usedvery_good" vs "UsedVeryGood").
         var allowedConds = allowedConditionsFor(listing.condition, config.conditionMatch);
+        var allowedNorm = allowedConds.map(normalizeCondition);
         var filteredOffers = offers.filter(function(o){
-          return allowedConds.some(function(c){ return c.toLowerCase() === (o.condition||'').toLowerCase(); });
+          return allowedNorm.indexOf(normalizeCondition(o.condition)) !== -1;
         });
 
         // Build diagnostics payload for single-SKU test mode
@@ -4659,8 +4672,9 @@ var server = http.createServer(function(req, res) {
           }
 
           var allowedConds = allowedConditionsFor(spCondition, config.conditionMatch);
+          var allowedNorm = allowedConds.map(normalizeCondition);
           var filteredOffers = offers.filter(function(o){
-            return allowedConds.some(function(c){ return c.toLowerCase() === (o.condition||'').toLowerCase(); });
+            return allowedNorm.indexOf(normalizeCondition(o.condition)) !== -1;
           });
 
           // Build diagnostic payload in the same shape the repricer uses
