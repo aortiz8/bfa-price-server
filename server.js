@@ -4939,13 +4939,19 @@ var server = http.createServer(function(req, res) {
     }
     connectMongo(function(err, database){
       if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable', items: [] })); return; }
-      // location.row and location.section are stored as user-typed strings.
-      // Match case-insensitive so "a"/"A" both work.
+      // location.row and location.section may be stored as either strings
+      // (from warehouse-tool listings) or numbers/uppercase-strings (from CSV
+      // imports). Match both variants with $in.
+      var rowAsInt = parseInt(rlRow, 10);
+      var rowCandidates = [rlRow, rlRow.toUpperCase(), rlRow.toLowerCase()];
+      if(!isNaN(rowAsInt)) rowCandidates.push(rowAsInt);
+      var secCandidates = [rlSec, rlSec.toUpperCase(), rlSec.toLowerCase()];
+
       var filter = {
         code: rlCode,
         status: 'active',
-        'location.row': { $regex: '^' + escapeRegex(rlRow) + '$', $options: 'i' },
-        'location.section': { $regex: '^' + escapeRegex(rlSec) + '$', $options: 'i' }
+        'location.row': { $in: rowCandidates },
+        'location.section': { $in: secCandidates }
       };
       database.collection('warehouse_inventory').find(filter)
         .project({
