@@ -975,18 +975,19 @@ function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms
 
 // ─── RECEIPT PDF GENERATION ───
 // Builds a thermal-receipt-sized PDF for warehouse listing slips.
-// Layout (top→bottom):
-//   1) Big location boxes (ROW / SECTION / #ITEM)
-//   2) Scannable barcode or QR code
-//   3) SKU text
-//   4) Business name + date
-//   5) Book title + author + meta (publisher/year/format/isbn)
-//   6) Price + condition
+// Layout (per user spec):
+//   1. Item # — HUGE, in both top corners (so it's findable from any angle)
+//   2. "ROW: X  SEC: Y  #Z" — medium-large, under corners
+//   3. Barcode or QR (per codeType) + SKU text below
+//   4. Horizontal rule separating "location zone" from "info zone"
+//   5. Book title (wrapped) + "by Author"
+//   6. Label/value rows: ISBN, Year, Publisher, Format, Sales Rank
+//   7. Price ($ big bold, left) + Condition (bold, right)
+//   8. Listed by: employeeName
+//   9. Date
 //
-// Uses pdf-lib to draw the PDF and bwip-js to generate the scannable code as
-// a PNG image embedded in the PDF. Returns a Uint8Array of PDF bytes.
-//
-// Page: 80mm wide (226.77pt). Height auto-sized to content.
+// Uses pdf-lib (no Chromium) + bwip-js (barcode → PNG bytes).
+// Page: 80mm wide; height auto-sized to fit content.
 async function buildReceiptPdf(data){
   var pdfLib = require('pdf-lib');
   var bwip = require('bwip-js');
@@ -995,8 +996,8 @@ async function buildReceiptPdf(data){
   var rgb = pdfLib.rgb;
 
   // Page dimensions — 80mm (3.15") wide
-  var PAGE_W = 226.77;   // 80mm in points
-  var MARGIN = 8;        // left/right padding in points
+  var PAGE_W = 226.77;
+  var MARGIN = 8;
   var CONTENT_W = PAGE_W - 2 * MARGIN;
 
   // Extract data with safe defaults
@@ -1013,11 +1014,20 @@ async function buildReceiptPdf(data){
   var year = String(book.year || '');
   var format = String(book.format || '');
   var isbn = String(book.isbn || '');
+  var salesRank = data.salesRank ? String(data.salesRank) : '';
   var priceStr = '$' + parseFloat(data.price || 0).toFixed(2);
-  var condition = String(data.condition || '');
+  var condition = String(data.condition || '').toUpperCase();
   var dateStr = String(data.dateStr || new Date().toLocaleDateString('en-US'));
+  var employeeName = String(data.employeeName || '');
 
-  // Generate barcode/QR as PNG bytes
+  // Create document + fonts first
+  var pdfDoc = await PDFDocument.create();
+  var fontReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  var fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  var fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
+  var fontMonoBold = await pdfDoc.embedFont(StandardFonts.CourierBold);
+
+  // Generate barcode/QR image
   var codeImageBytes = null;
   var codeImageW = 0, codeImageH = 0;
   try {
@@ -1035,7 +1045,7 @@ async function buildReceiptPdf(data){
         bcid: 'code128',
         text: sku,
         scale: 3,
-        height: 18,            // mm
+        height: 18,
         includetext: false,
         paddingwidth: 4,
         paddingheight: 2
@@ -1044,187 +1054,161 @@ async function buildReceiptPdf(data){
       codeImageH = 60;
     }
   } catch(e){
-    // If barcode gen fails, continue without image (SKU text still printed)
     console.error('[buildReceiptPdf] barcode gen failed:', e.message);
   }
 
-  // Calculate total page height by summing section heights.
-  // We build the sections first, measure, then allocate the page.
-  var pdfDoc = await PDFDocument.create();
-  var fontReg = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  var fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  var fontMono = await pdfDoc.embedFont(StandardFonts.Courier);
-  var fontMonoBold = await pdfDoc.embedFont(StandardFonts.CourierBold);
+  // Pre-wrap title to calculate height
+  var titleLines = wrapText(title, fontBold, 11, CONTENT_W);
+  var titleLinesUsed = Math.min(titleLines.length, 3);
 
-  // Section heights (tuned by trial):
-  var hLocation = 70;   // big boxed row/section/# at top
-  var hCodeArea = codeImageBytes ? (codeImageH + 20) : 10;
-  var hSkuText = 22;
-  var hBizDate = 20;
-  var hBook = 80;       // title + author + 2x2 grid
-  var hPrice = 44;      // price + condition
-  var hFooter = 16;
-  var PAGE_H = hLocation + hCodeArea + hSkuText + hBizDate + hBook + hPrice + hFooter + 20;
+  // Build meta rows list (only include rows with values)
+  var metaRows = [];
+  if(isbn) metaRows.push(['ISBN', isbn]);
+  if(year) metaRows.push(['Year', year]);
+  if(publisher) metaRows.push(['Publisher', publisher]);
+  if(format) metaRows.push(['Format', format]);
+  if(salesRank) metaRows.push(['Sales Rank', '#' + salesRank]);
+
+  // Calculate total page height by summing section heights
+  var hCornerItemNums = 42;    // the big #55 #55 line
+  var hLocationRow = 22;       // medium ROW SEC ITEM line
+  var hBarcodeBlock = codeImageBytes ? (codeImageH + 22) : 22;
+  var hDivider = 12;           // horizontal rule + padding
+  var hTitleLines = titleLinesUsed * 14 + 4;
+  var hAuthor = author ? 14 : 0;
+  var hMeta = metaRows.length * 13 + 6;
+  var hPriceBlock = 40;
+  var hFooter = employeeName ? 28 : 16;
+
+  var PAGE_H = hCornerItemNums + hLocationRow + hBarcodeBlock
+             + hDivider + hTitleLines + hAuthor + hMeta
+             + hPriceBlock + hFooter + 30; // + top/bottom padding
 
   var page = pdfDoc.addPage([PAGE_W, PAGE_H]);
+  var cursorY = PAGE_H - 8; // start near top
 
-  // pdf-lib uses bottom-left origin; we draw top-down by converting y
-  var cursorY = PAGE_H;   // top of page
-
-  // ── 1. LOCATION ROW (big boxes) ──
-  // 3 boxes side by side: ROW, SECTION, #ITEM
-  var locBoxH = 54;
-  var locBoxY = cursorY - locBoxH - 6;
-  var gap = 4;
-  var boxW = (CONTENT_W - 2 * gap) / 3;
-  var labels = [['ROW', locRow], ['SECTION', locSec], ['ITEM', '#' + locSeq]];
-  labels.forEach(function(pair, i){
-    var x = MARGIN + i * (boxW + gap);
-    // box border
-    page.drawRectangle({
-      x: x, y: locBoxY,
-      width: boxW, height: locBoxH,
-      borderColor: rgb(0,0,0), borderWidth: 2
-    });
-    // big value
-    var valTxt = pair[1];
-    var valSize = valTxt.length > 4 ? 18 : 24;
-    var valW = fontMonoBold.widthOfTextAtSize(valTxt, valSize);
-    page.drawText(valTxt, {
-      x: x + (boxW - valW)/2, y: locBoxY + 20,
-      size: valSize, font: fontMonoBold, color: rgb(0,0,0)
-    });
-    // label below
-    var lblW = fontBold.widthOfTextAtSize(pair[0], 7);
-    page.drawText(pair[0], {
-      x: x + (boxW - lblW)/2, y: locBoxY + 6,
-      size: 7, font: fontBold, color: rgb(0.4, 0.4, 0.4)
-    });
+  // ── 1. BIG ITEM # IN BOTH CORNERS ──
+  var itemNumTxt = '#' + locSeq;
+  var itemNumSize = 32;
+  var itemNumW = fontBold.widthOfTextAtSize(itemNumTxt, itemNumSize);
+  // left corner
+  page.drawText(itemNumTxt, {
+    x: MARGIN, y: cursorY - itemNumSize,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
-  // thick divider below location
-  page.drawLine({
-    start: { x: MARGIN, y: locBoxY - 4 },
-    end: { x: PAGE_W - MARGIN, y: locBoxY - 4 },
-    thickness: 2, color: rgb(0,0,0)
+  // right corner
+  page.drawText(itemNumTxt, {
+    x: PAGE_W - MARGIN - itemNumW, y: cursorY - itemNumSize,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
-  cursorY = locBoxY - 10;
+  cursorY -= (itemNumSize + 10);
 
-  // ── 2. BARCODE or QR ──
+  // ── 2. LOCATION ROW — medium-large centered ──
+  var locTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
+  var locSize = 14;
+  var locW = fontBold.widthOfTextAtSize(locTxt, locSize);
+  // If too wide, scale down
+  if(locW > CONTENT_W){
+    locSize = Math.floor(locSize * CONTENT_W / locW);
+    locW = fontBold.widthOfTextAtSize(locTxt, locSize);
+  }
+  page.drawText(locTxt, {
+    x: MARGIN + (CONTENT_W - locW) / 2,
+    y: cursorY - locSize,
+    size: locSize, font: fontBold, color: rgb(0,0,0)
+  });
+  cursorY -= (locSize + 10);
+
+  // ── 3. BARCODE/QR + SKU TEXT ──
   if(codeImageBytes){
     var codeImage = await pdfDoc.embedPng(codeImageBytes);
     var imgX = MARGIN + (CONTENT_W - codeImageW) / 2;
-    var imgY = cursorY - codeImageH - 4;
+    var imgY = cursorY - codeImageH;
     page.drawImage(codeImage, { x: imgX, y: imgY, width: codeImageW, height: codeImageH });
-    cursorY = imgY - 4;
+    cursorY = imgY - 2;
   }
-
-  // ── 3. SKU text (mono, large, centered) ──
-  var skuSize = 13;
+  var skuSize = 14;
   var skuW = fontMonoBold.widthOfTextAtSize(sku, skuSize);
   page.drawText(sku, {
     x: MARGIN + (CONTENT_W - skuW) / 2,
-    y: cursorY - skuSize - 2,
+    y: cursorY - skuSize,
     size: skuSize, font: fontMonoBold, color: rgb(0,0,0)
   });
-  cursorY -= (skuSize + 10);
-  // light divider
+  cursorY -= (skuSize + 6);
+
+  // ── 4. STRAIGHT LINE BREAK ──
   page.drawLine({
     start: { x: MARGIN, y: cursorY },
     end: { x: PAGE_W - MARGIN, y: cursorY },
-    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
+    thickness: 1, color: rgb(0,0,0)
   });
+  cursorY -= 10;
+
+  // ── 5. TITLE + AUTHOR ──
+  titleLines.slice(0, 3).forEach(function(line){
+    page.drawText(line, {
+      x: MARGIN, y: cursorY - 11,
+      size: 11, font: fontBold, color: rgb(0,0,0)
+    });
+    cursorY -= 14;
+  });
+  if(author){
+    page.drawText('by ' + author, {
+      x: MARGIN, y: cursorY - 10,
+      size: 10, font: fontReg, color: rgb(0.3, 0.3, 0.3)
+    });
+    cursorY -= 14;
+  }
   cursorY -= 4;
 
-  // ── 4. Business + date ──
-  page.drawText('BOOKS FOR AGES', {
-    x: MARGIN, y: cursorY - 10,
-    size: 9, font: fontBold, color: rgb(0,0,0)
-  });
-  var dateW = fontMono.widthOfTextAtSize(dateStr, 8);
-  page.drawText(dateStr, {
-    x: PAGE_W - MARGIN - dateW, y: cursorY - 10,
-    size: 8, font: fontMono, color: rgb(0.5, 0.5, 0.5)
-  });
-  cursorY -= 16;
-  page.drawLine({
-    start: { x: MARGIN, y: cursorY },
-    end: { x: PAGE_W - MARGIN, y: cursorY },
-    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
+  // ── 6. META ROWS (label : value) ──
+  // Labels left-aligned, values tab-stopped at 70pt from margin
+  var labelX = MARGIN;
+  var valueX = MARGIN + 70;
+  metaRows.forEach(function(pair){
+    page.drawText(pair[0], {
+      x: labelX, y: cursorY - 9,
+      size: 9, font: fontBold, color: rgb(0.4, 0.4, 0.4)
+    });
+    // Value — use mono for data-ish content, regular for text
+    var useMono = ['ISBN', 'Year', 'Sales Rank'].indexOf(pair[0]) !== -1;
+    var valFont = useMono ? fontMono : fontReg;
+    var valTxt = String(pair[1]).slice(0, 24);
+    page.drawText(valTxt, {
+      x: valueX, y: cursorY - 9,
+      size: 9, font: valFont, color: rgb(0,0,0)
+    });
+    cursorY -= 13;
   });
   cursorY -= 6;
 
-  // ── 5. BOOK INFO ──
-  // Title (wrapped if needed)
-  var titleLines = wrapText(title, fontBold, 11, CONTENT_W);
-  titleLines.slice(0, 2).forEach(function(line){
-    page.drawText(line, { x: MARGIN, y: cursorY - 11, size: 11, font: fontBold, color: rgb(0,0,0) });
-    cursorY -= 13;
-  });
-  cursorY -= 2;
-  // Author
-  if(author){
-    page.drawText(author, { x: MARGIN, y: cursorY - 9, size: 9, font: fontReg, color: rgb(0.4, 0.4, 0.4) });
-    cursorY -= 13;
-  }
-  // Meta grid (2x2): Publisher | Year / Format | ISBN
-  var halfW = CONTENT_W / 2;
-  function drawMetaPair(label, value, x, y){
-    page.drawText(label.toUpperCase(), { x: x, y: y, size: 6, font: fontBold, color: rgb(0.6, 0.6, 0.6) });
-    page.drawText(String(value).slice(0, 20), { x: x, y: y - 8, size: 8, font: fontReg, color: rgb(0,0,0) });
-  }
-  if(publisher || year){
-    drawMetaPair('Publisher', publisher || '—', MARGIN, cursorY - 6);
-    drawMetaPair('Year', year || '—', MARGIN + halfW, cursorY - 6);
-    cursorY -= 20;
-  }
-  if(format || isbn){
-    drawMetaPair('Format', format || '—', MARGIN, cursorY - 6);
-    drawMetaPair('ISBN', isbn || '—', MARGIN + halfW, cursorY - 6);
-    cursorY -= 20;
-  }
-  cursorY -= 2;
-  page.drawLine({
-    start: { x: MARGIN, y: cursorY },
-    end: { x: PAGE_W - MARGIN, y: cursorY },
-    thickness: 0.5, color: rgb(0.8, 0.8, 0.8)
-  });
-  cursorY -= 6;
-
-  // ── 6. PRICE + CONDITION ──
-  page.drawText('LISTED PRICE', {
-    x: MARGIN, y: cursorY - 7,
-    size: 6, font: fontBold, color: rgb(0.6, 0.6, 0.6)
-  });
+  // ── 7. PRICE + CONDITION ──
   page.drawText(priceStr, {
-    x: MARGIN, y: cursorY - 28,
-    size: 22, font: fontMonoBold, color: rgb(0,0,0)
+    x: MARGIN, y: cursorY - 22,
+    size: 22, font: fontBold, color: rgb(0,0,0)
   });
   if(condition){
-    // right-aligned condition pill
-    var condSize = 11;
+    var condSize = 16;
     var condW = fontBold.widthOfTextAtSize(condition, condSize);
-    var pillPad = 8;
-    var pillW = condW + pillPad * 2;
-    var pillH = 20;
-    var pillX = PAGE_W - MARGIN - pillW;
-    var pillY = cursorY - 24;
-    page.drawRectangle({
-      x: pillX, y: pillY,
-      width: pillW, height: pillH,
-      borderColor: rgb(0.6, 0.8, 0.6), borderWidth: 1,
-      color: rgb(0.94, 0.99, 0.94)
-    });
     page.drawText(condition, {
-      x: pillX + pillPad, y: pillY + 5,
-      size: condSize, font: fontBold, color: rgb(0.1, 0.5, 0.2)
+      x: PAGE_W - MARGIN - condW,
+      y: cursorY - 20,
+      size: condSize, font: fontBold, color: rgb(0,0,0)
     });
   }
-  cursorY -= 36;
+  cursorY -= 32;
 
-  // ── 7. Footer ──
-  page.drawText('Row ' + locRow + ' · Section ' + locSec + ' · #' + locSeq, {
-    x: MARGIN, y: 8,
-    size: 7, font: fontReg, color: rgb(0.6, 0.6, 0.6)
+  // ── 8. Employee + date footer ──
+  if(employeeName){
+    page.drawText('Listed by: ' + employeeName, {
+      x: MARGIN, y: cursorY - 9,
+      size: 9, font: fontReg, color: rgb(0.3, 0.3, 0.3)
+    });
+    cursorY -= 12;
+  }
+  page.drawText(dateStr, {
+    x: MARGIN, y: cursorY - 9,
+    size: 9, font: fontMono, color: rgb(0.5, 0.5, 0.5)
   });
 
   var bytes = await pdfDoc.save();
