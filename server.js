@@ -2386,7 +2386,7 @@ async function runSyncCycle(subscriberCode){
         if(!record){
           logSyncAction(subscriberCode, {
             sku: sku, soldPlatform: 'amazon', amazonOrderId: order.AmazonOrderId,
-            action: 'skip', reason: 'SKU not in warehouse_inventory', success: false
+            action: 'skip', reason: 'SKU not in warehouse_inventory (listed via another system)', success: true
           });
           continue;
         }
@@ -2557,7 +2557,7 @@ async function runSyncCycle(subscriberCode){
       if(!record2){
         logSyncAction(subscriberCode, {
           sku: eo.sku, soldPlatform: 'ebay', ebayOrderId: eo.orderId,
-          action: 'skip', reason: 'SKU not in warehouse_inventory (and no ItemID fallback match)', success: false
+          action: 'skip', reason: 'SKU not in warehouse_inventory (listed via another system)', success: true
         });
         continue;
       }
