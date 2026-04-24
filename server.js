@@ -2282,11 +2282,9 @@ async function runSyncCycle(subscriberCode){
     var database = await new Promise(function(resolve){ connectMongo(function(err, d){ resolve(d); }); });
     if(!database){ syncRunning[subscriberCode] = false; return; }
 
-    // Determine "since" timestamp (default: 10 minutes ago if first run)
-    var lastAmazon = sub.sync.lastAmazonCheckedAt ? new Date(sub.sync.lastAmazonCheckedAt) : new Date(Date.now() - 10*60*1000);
+    // Determine "since" timestamp for eBay side only (Amazon sync no longer
+    // filters by timestamp — see Option B comment below).
     var lastEbay = sub.sync.lastEbayCheckedAt ? new Date(sub.sync.lastEbayCheckedAt) : new Date(Date.now() - 10*60*1000);
-    // Amazon CreatedAfter must be at least 1 min ago
-    var amazonSince = new Date(Math.min(Date.now() - 60*1000, lastAmazon.getTime())).toISOString();
     var ebaySince = new Date(lastEbay.getTime()).toISOString();
 
     // HEARTBEAT: log every single sync cycle so we can confirm sync is actually running
@@ -2294,15 +2292,25 @@ async function runSyncCycle(subscriberCode){
       sku: '_debug_',
       soldPlatform: 'amazon',
       action: 'sync-cycle-start',
-      reason: 'amazonSince=' + amazonSince + ' ebaySince=' + ebaySince,
+      reason: 'ebaySince=' + ebaySince + ' (amazon=full-cache-dedup)',
       success: true
     });
 
-    // ── AMAZON SIDE — uses shared cache (3min TTL) ──
-    // Shared cache shared with pick list, sales to minimize Amazon API quota.
+    // ── AMAZON SIDE — Option B: full-cache scan with dedup ──
+    // We used to filter Amazon orders by a "since" timestamp (last time sync
+    // successfully ran). That created a race condition: if the shared cache
+    // was stale when a new order arrived, the "since" timestamp would advance
+    // past the order's creation time on the next cycle, and we'd never see it.
+    //
+    // New approach: pull the full 7-day shared cache every cycle (no timestamp
+    // filter), then rely on sync_log dedup (processedAmazonSet) to skip orders
+    // we've already handled. Cost: a few extra MongoDB lookups per cycle. Gain:
+    // cannot miss an order due to cache/timestamp race.
     var amazonFetchErr = null;
     var amazonAllOrders = await new Promise(function(resolve){
-      getAmazonOrdersSince(subscriberCode, sub, amazonSince, function(err, orders, info){
+      // Pass sinceIso = 7 days ago so filter becomes no-op (cache already holds 7d).
+      var amazonSinceFull = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+      getAmazonOrdersSince(subscriberCode, sub, amazonSinceFull, function(err, orders, info){
         if(err) amazonFetchErr = err;
         if(info && info.stale && info.error) amazonFetchErr = info.error;
         resolve(err ? [] : (orders || []));
