@@ -4594,6 +4594,134 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Suggested price for warehouse listing tool (Amazon rule engine) ──
+  // Calls Amazon SP-API for competing offers on the ASIN, filters by condition
+  // per subscriber's repricer config, applies undercut strategy, enforces floor.
+  // Returns the same shape of result the repricer produces, so the warehouse
+  // tool shows prices consistent with what the repricer would set on day 2.
+  //
+  // Query: ?code=X&asin=Y&condition=Good
+  // Response: {
+  //   suggested: Number,           // the price to show in the UI
+  //   source: 'amazon-rules' | 'no-amazon-offers' | 'no-matching-condition' | 'error',
+  //   reason: String,              // human-readable explanation
+  //   diag: {...}                  // same shape as repricer diagnostics
+  // }
+  if (pathname === '/warehouse/suggest-price' && req.method === 'GET') {
+    var spCode = (parsed.query.code || '').toUpperCase();
+    var spAsin = (parsed.query.asin || '').trim();
+    var spCondition = (parsed.query.condition || 'Good').trim();
+    if(!spCode || !spAsin){
+      res.writeHead(400); res.end(JSON.stringify({ error: 'Missing code or asin' })); return;
+    }
+    getSubscriber(spCode, function(subErr, sub){
+      if(subErr || !sub){ res.writeHead(200); res.end(JSON.stringify({ error: 'Subscriber not found', suggested: 9.99, source: 'error' })); return; }
+      // Use same defaults as runRepricerCycle so behavior is consistent.
+      var config = Object.assign({
+        floorPrice: 5.99,
+        conditionMatch: 'smart',
+        undercutStrategy: 'penny',
+        fulfillmentFilter: 'fbm-only'
+      }, sub.repricer || {});
+      var sellerId = sub.amazonSellerId || AMAZON_SELLER_ID;
+      var marketplaceId = AMAZON_MARKETPLACE_ID;
+
+      getAmazonAccessToken(function(tokErr, accessToken){
+        if(tokErr){
+          res.writeHead(200); res.end(JSON.stringify({ error: 'Amazon auth failed', suggested: 9.99, source: 'error' })); return;
+        }
+        fetchAmazonOffers(accessToken, marketplaceId, spAsin, function(offErr, offers){
+          if(offErr || !offers){
+            // No Amazon offers at all — per user's rule, default to $100.
+            res.writeHead(200); res.end(JSON.stringify({
+              suggested: 100,
+              source: 'no-amazon-offers',
+              reason: 'Amazon returned no offers for ASIN ' + spAsin + ' — defaulting to $100',
+              diag: { asin: spAsin, condition: spCondition, totalOffers: 0 }
+            }));
+            return;
+          }
+
+          var allowedConds = allowedConditionsFor(spCondition, config.conditionMatch);
+          var filteredOffers = offers.filter(function(o){
+            return allowedConds.some(function(c){ return c.toLowerCase() === (o.condition||'').toLowerCase(); });
+          });
+
+          // Build diagnostic payload in the same shape the repricer uses
+          var postFilter = filteredOffers.filter(function(o){ return o.sellerId !== sellerId; });
+          if(config.fulfillmentFilter === 'fbm-only'){
+            postFilter = postFilter.filter(function(o){ return o.fulfillment === 'FBM'; });
+          }
+          postFilter.sort(function(a,b){ return a.price - b.price; });
+          var diag = {
+            asin: spAsin,
+            condition: spCondition,
+            mySellerId: sellerId,
+            configMatch: config.conditionMatch,
+            configFulfillment: config.fulfillmentFilter,
+            configUndercut: config.undercutStrategy,
+            configFloorPrice: config.floorPrice,
+            allowedConds: allowedConds,
+            totalOffers: offers.length,
+            afterConditionFilter: filteredOffers.length,
+            afterAllFilters: postFilter.length,
+            offersAll: offers.slice(0, 30).map(function(o){
+              return { price: o.price, condition: o.condition, fulfillment: o.fulfillment, sellerId: o.sellerId, isMe: o.sellerId === sellerId };
+            }),
+            competingAfterFilters: postFilter.slice(0, 10).map(function(o){
+              return { price: o.price, condition: o.condition, fulfillment: o.fulfillment, sellerId: o.sellerId };
+            })
+          };
+
+          if(!filteredOffers.length){
+            // Amazon has offers but none matching the book's condition.
+            res.writeHead(200); res.end(JSON.stringify({
+              suggested: 100,
+              source: 'no-matching-condition',
+              reason: 'No Amazon offers in matching condition bucket — defaulting to $100',
+              diag: diag
+            }));
+            return;
+          }
+
+          var result = calcTargetFromOffers(filteredOffers, sellerId, config);
+          if(!result){
+            // Rules engine couldn't produce a target (e.g. all my own offers)
+            res.writeHead(200); res.end(JSON.stringify({
+              suggested: 100,
+              source: 'no-competing-offers',
+              reason: 'After excluding own offers, nothing left to undercut — defaulting to $100',
+              diag: diag
+            }));
+            return;
+          }
+
+          // Floor enforcement (same rule as applyGuards but without the 24h
+          // window or first-pass checks — those don't apply to a brand-new book).
+          var suggested = result.targetPrice;
+          var floorEnforced = false;
+          if(suggested < config.floorPrice){
+            suggested = config.floorPrice;
+            floorEnforced = true;
+          }
+          suggested = Math.round(suggested * 100) / 100;
+
+          diag.rulesOutput = result.targetPrice;
+          diag.floorEnforced = floorEnforced;
+          diag.finalSuggestion = suggested;
+
+          res.writeHead(200); res.end(JSON.stringify({
+            suggested: suggested,
+            source: 'amazon-rules',
+            reason: result.reason + (floorEnforced ? ' · floor $' + config.floorPrice.toFixed(2) + ' enforced' : ''),
+            diag: diag
+          }));
+        });
+      });
+    });
+    return;
+  }
+
   // ── Debug: Get seller info from token ──
   if (pathname === '/warehouse/check-seller' && req.method === 'GET') {
     getAmazonAccessToken(function(err, accessToken){
