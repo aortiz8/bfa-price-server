@@ -2800,6 +2800,60 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Session resume (whoami) ──
+  // Frontend calls this on page load with a saved session token. If valid,
+  // returns the same shape /validate-code does so the UI can skip the login
+  // screen. If invalid/expired, returns { valid: false } and the frontend
+  // clears its stored token and shows the login screen as normal.
+  if (pathname === '/whoami' && req.method === 'GET') {
+    var waSess = getRequestSession(req, parsed);
+    if(!waSess){
+      res.writeHead(200); res.end(JSON.stringify({ valid: false, reason: 'Session expired or invalid' })); return;
+    }
+    getSubscriber(waSess.subscriberCode, function(err, sub){
+      if(err || !sub || !sub.active){
+        res.writeHead(200); res.end(JSON.stringify({ valid: false, reason: 'Subscriber not found or inactive' })); return;
+      }
+      var employees = sub.employees || [];
+      var role = waSess.role;
+      var employeeName = waSess.employeeName || null;
+      var response = {
+        valid: true,
+        role: role,
+        employeeName: employeeName,
+        sessionToken: null, // client already has its token, don't re-issue
+        businessName: sub.businessName,
+        employees: employees.map(function(e){
+          return role === 'admin' ? e : { name: e.name };
+        })
+      };
+      // Admin-only sensitive fields — same as /validate-code
+      if (role === 'admin') {
+        response.reportEmail = sub.email;
+        response.ebayClientId = sub.ebayClientId || '';
+        response.ebayClientSecret = sub.ebayClientSecret || '';
+        response.ebayDevId = sub.ebayDevId || '';
+        response.ebayUserToken = sub.ebayUserToken || '';
+        response.ebayOAuthToken = sub.ebayOAuthToken || '';
+        response.ebayShippingPolicyId = sub.ebayShippingPolicyId || '';
+        response.ebayPaymentPolicyId = sub.ebayPaymentPolicyId || '';
+        response.ebayReturnPolicyId = sub.ebayReturnPolicyId || '';
+        response.businessAddressLine1 = sub.businessAddressLine1 || '';
+        response.businessAddressLine2 = sub.businessAddressLine2 || '';
+        response.businessCity = sub.businessCity || '';
+        response.businessState = sub.businessState || '';
+        response.businessZip = sub.businessZip || '';
+        response.businessPhone = sub.businessPhone || '';
+        response.vendors = sub.vendors || [];
+        response.customers = sub.customers || [];
+        response.savedDescriptions = sub.savedDescriptions || [];
+        response.invoicePayableTo = sub.invoicePayableTo || '';
+      }
+      res.writeHead(200); res.end(JSON.stringify(response));
+    });
+    return;
+  }
+
   // ── Price search ──
   if ((pathname === '/price' || pathname === '/sold') && req.method === 'GET') {
     var title = parsed.query.title || '';
