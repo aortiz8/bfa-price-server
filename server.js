@@ -973,6 +973,11 @@ var repricerSchedulerInterval = null;
 // Sleep helper
 function sleep(ms){ return new Promise(function(resolve){ setTimeout(resolve, ms); }); }
 
+// Escape a string for safe use in a MongoDB $regex (or RegExp).
+function escapeRegex(s){
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // ─── RECEIPT PDF GENERATION ───
 // Builds a thermal-receipt-sized PDF for warehouse listing slips.
 // Layout (per user spec):
@@ -4908,6 +4913,83 @@ var server = http.createServer(function(req, res) {
           }).catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ error: e.message })); });
         });
       });
+    });
+    return;
+  }
+
+  // ── Warehouse: Recent 5 active books at a given Row+Section ──
+  // GET /warehouse/recent-at-location?code=X&row=Y&section=Z
+  // Returns up to 5 most recent active records at that shelf location, sorted
+  // by sequence DESC (highest # first). Used by the warehouse listing tool to
+  // show context after a location is confirmed — so the operator can see what
+  // else is on that shelf without digging through the portal.
+  //
+  // Filters:
+  //   - status: 'active' only (no sold/deleted/sold-amazon/sold-ebay)
+  //   - row + section must match exactly (case-insensitive)
+  //
+  // Response: { items: [ { sku, title, author, isbn, publisher, year, format,
+  //   condition, price, location, coverUrl, ebayItemId, asin, itemId, createdAt } ] }
+  if (pathname === '/warehouse/recent-at-location' && req.method === 'GET') {
+    var rlCode = (parsed.query.code || '').toUpperCase();
+    var rlRow = String(parsed.query.row || '').trim();
+    var rlSec = String(parsed.query.section || '').trim();
+    if(!rlCode || !rlRow || !rlSec){
+      res.writeHead(400); res.end(JSON.stringify({ error: 'code, row, section required' })); return;
+    }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable', items: [] })); return; }
+      // location.row and location.section are stored as user-typed strings.
+      // Match case-insensitive so "a"/"A" both work.
+      var filter = {
+        code: rlCode,
+        status: 'active',
+        'location.row': { $regex: '^' + escapeRegex(rlRow) + '$', $options: 'i' },
+        'location.section': { $regex: '^' + escapeRegex(rlSec) + '$', $options: 'i' }
+      };
+      database.collection('warehouse_inventory').find(filter)
+        .project({
+          sku:1, title:1, author:1, isbn:1, publisher:1, year:1, format:1,
+          condition:1, price:1, location:1, coverUrl:1, ebayItemId:1, asin:1, createdAt:1
+        })
+        // Sort by sequence DESC. sequence is stored as a string (workers type it),
+        // so we convert to number in the sort by using $toInt via an aggregation
+        // pipeline. Simpler: sort by createdAt DESC as a tiebreaker and let
+        // client re-sort. Keeping it simple: sort by sequence (lexicographic) DESC.
+        .sort({ 'location.sequence': -1, createdAt: -1 })
+        .limit(20)  // fetch 20 to re-sort numerically, then slice to 5
+        .toArray()
+        .then(function(docs){
+          // Numerical sort by sequence (defensive — lexicographic would put "9" after "10")
+          docs.sort(function(a, b){
+            var sa = parseInt((a.location && a.location.sequence) || 0, 10) || 0;
+            var sb = parseInt((b.location && b.location.sequence) || 0, 10) || 0;
+            return sb - sa;
+          });
+          var items = docs.slice(0, 5).map(function(d){
+            return {
+              itemId: d._id,
+              sku: d.sku,
+              title: d.title,
+              author: d.author,
+              isbn: d.isbn,
+              publisher: d.publisher,
+              year: d.year,
+              format: d.format,
+              condition: d.condition,
+              price: d.price,
+              location: d.location,
+              coverUrl: d.coverUrl,
+              ebayItemId: d.ebayItemId || null,
+              asin: d.asin || null,
+              createdAt: d.createdAt
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({ items: items }));
+        })
+        .catch(function(e){
+          res.writeHead(200); res.end(JSON.stringify({ error: e.message, items: [] }));
+        });
     });
     return;
   }
