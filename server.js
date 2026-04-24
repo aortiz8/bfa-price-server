@@ -988,12 +988,20 @@ function allowedConditionsFor(myCondition, matchMode){
     if(c === 'new') return ['New'];
     return ['UsedLikeNew','UsedVeryGood','UsedGood','UsedAcceptable'];
   }
-  // smart (default)
-  if(c === 'new') return ['New'];
-  if(c === 'like new' || c === 'likenew') return ['UsedLikeNew','UsedVeryGood','UsedGood'];
-  if(c === 'very good' || c === 'verygood') return ['UsedVeryGood','UsedGood'];
-  if(c === 'good') return ['UsedGood'];
-  if(c === 'acceptable') return ['UsedAcceptable'];
+  // smart (default) — each condition competes with itself + all better conditions.
+  // Rationale: a worse-condition book can undercut better-condition listings
+  // because buyers may still pick it for price; but a New/LikeNew buyer won't
+  // typically settle for a worse condition, so we don't look down.
+  //   New            → New (stands alone at the top)
+  //   Like New       → Like New + New
+  //   Very Good      → Very Good + Like New + New
+  //   Good           → Good + Very Good + Like New + New
+  //   Acceptable     → everything (bottom tier competes with all)
+  if(c === 'new')                                    return ['New'];
+  if(c === 'like new' || c === 'likenew')            return ['UsedLikeNew','New'];
+  if(c === 'very good' || c === 'verygood')          return ['UsedVeryGood','UsedLikeNew','New'];
+  if(c === 'good')                                   return ['UsedGood','UsedVeryGood','UsedLikeNew','New'];
+  if(c === 'acceptable')                             return ['UsedAcceptable','UsedGood','UsedVeryGood','UsedLikeNew','New'];
   return [];
 }
 
