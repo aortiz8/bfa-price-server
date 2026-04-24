@@ -1081,30 +1081,38 @@ async function buildReceiptPdf(data){
   if(format) metaRows.push(['Format', format]);
   if(salesRank) metaRows.push(['Sales Rank', '#' + salesRank]);
 
-  // Target total page height ~7 inches (504pt). This gives breathing room and
-  // makes room for the mirrored bottom zone. We compute content height, then
-  // pad as needed to reach 504pt.
-  var PAGE_H_TARGET = 504; // 7 inches in points
+  // Target page height. We want plenty of breathing room between sections +
+  // a big dedicated gap between the middle (info) zone and the bottom
+  // (mirrored location) zone. 8 inches gives enough room without feeling
+  // wasteful. If content is longer than this, page grows.
+  var PAGE_H_TARGET = 576; // 8 inches in points
 
-  // Content section heights (top zone + middle zone)
-  var hCornerItemNums = 42;
-  var hLocationRow = 22;
-  var hBarcodeBlock = codeImageBytes ? (codeImageH + 22) : 22;
-  var hDivider = 12;
-  var hTitleLines = titleLinesUsed * 14 + 4;
+  // Content section heights. These match the actual cursorY movements in the
+  // drawing code below — if you change spacing there, update here too or the
+  // page will be too short and zones will overlap.
+  // Top zone
+  var hCornerItemNums = 32 + 18;        // itemNumSize + trailing gap
+  var hLocationRow = 14 + 18;           // locSize + trailing gap
+  var hBarcodeBlock = codeImageBytes ? (codeImageH + 6 + 14 + 14) : 14;  // +skuSize + gaps
+  var hDivider = 16 + 16;               // gap-before-divider + gap-after-divider
+  // Middle zone
+  var hTitleLines = titleLinesUsed * 14;
   var hAuthor = author ? 14 : 0;
-  var hMeta = metaRows.length * 13 + 6;
-  var hPriceBlock = 40;
-  var hFooter = employeeName ? 28 : 16;
+  var hTitleBlockTrailer = 10;          // gap after title/author block
+  var hMeta = metaRows.length * 15 + 12; // meta row height + trailing gap
+  var hPriceBlock = 40;                  // price/condition + trailing gap
+  var hFooter = employeeName ? (14 + 14) : 14; // employee line + date line
+  // Bottom mirrored zone matches the top (drawn bottom-up from y=12)
+  var hBottomZone = 12 + 32 + 18 + 14 + 18 + (codeImageBytes ? codeImageH + 12 : 0) + 14;
 
-  // Bottom mirrored zone matches the top location zone (without extra spacing)
-  var hBottomZone = hCornerItemNums + hLocationRow + hBarcodeBlock;
+  // Dedicated gap between middle zone footer and bottom zone
+  var hMidBottomGap = 50;
 
   var contentH = hCornerItemNums + hLocationRow + hBarcodeBlock
-             + hDivider + hTitleLines + hAuthor + hMeta
-             + hPriceBlock + hFooter + hBottomZone + 60; // baseline padding
+             + hDivider + hTitleLines + hAuthor + hTitleBlockTrailer + hMeta
+             + hPriceBlock + hFooter + hMidBottomGap + hBottomZone + 20;
 
-  // Pad to 7" if content is shorter
+  // Pad to target if content is shorter
   var PAGE_H = Math.max(contentH, PAGE_H_TARGET);
 
   var page = pdfDoc.addPage([PAGE_W, PAGE_H]);
