@@ -1246,15 +1246,15 @@ async function buildReceiptPdf(data){
   });
   by += itemNumSize + 10;
 
-  // SKU text
-  var bSkuSize = 14;
-  var bSkuW = fontMonoBold.widthOfTextAtSize(sku, bSkuSize);
-  page.drawText(sku, {
-    x: MARGIN + (CONTENT_W - bSkuW) / 2,
+  // Location line (ROW: X  SEC: Y  #Z) — was where SKU used to be
+  var bLocTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
+  var bLocW = fontBold.widthOfTextAtSize(bLocTxt, locSize);
+  page.drawText(bLocTxt, {
+    x: MARGIN + (CONTENT_W - bLocW) / 2,
     y: by,
-    size: bSkuSize, font: fontMonoBold, color: rgb(0,0,0)
+    size: locSize, font: fontBold, color: rgb(0,0,0)
   });
-  by += bSkuSize + 6;
+  by += locSize + 6;
 
   // Barcode or QR code
   if(codeImageBytes){
@@ -1267,13 +1267,13 @@ async function buildReceiptPdf(data){
     by += codeImageH + 8;
   }
 
-  // Location line (ROW: X  SEC: Y  #Z)
-  var bLocTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
-  var bLocW = fontBold.widthOfTextAtSize(bLocTxt, locSize);
-  page.drawText(bLocTxt, {
-    x: MARGIN + (CONTENT_W - bLocW) / 2,
+  // SKU text — now ABOVE the barcode (was below)
+  var bSkuSize = 14;
+  var bSkuW = fontMonoBold.widthOfTextAtSize(sku, bSkuSize);
+  page.drawText(sku, {
+    x: MARGIN + (CONTENT_W - bSkuW) / 2,
     y: by,
-    size: locSize, font: fontBold, color: rgb(0,0,0)
+    size: bSkuSize, font: fontMonoBold, color: rgb(0,0,0)
   });
 
   var bytes = await pdfDoc.save();
