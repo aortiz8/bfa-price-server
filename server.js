@@ -6906,6 +6906,123 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Admin inventory search ──
+  // GET /my/inventory-search?code=X&q=...&location=...&olderThan=...&youngerThan=...&includeInactive=...&sort=...
+  // Returns up to 200 matching records. Used by the Utilities → Inventory Search tool.
+  // Fields searchable via `q`: sku, asin, isbn, title, author (case-insensitive substring match).
+  // Filters: location (Row-Section like "1-A"), olderThan/youngerThan (days), includeInactive (show sold/deleted).
+  // Sort: 'date' (newest first), 'dateOld' (oldest first), 'author' (A-Z).
+  if (pathname === '/my/inventory-search' && req.method === 'GET') {
+    var iCode = (parsed.query.code || '').toUpperCase();
+    var iSess = getRequestSession(req, parsed);
+    if(!iSess || iSess.role !== 'admin' || iSess.subscriberCode !== iCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var q = (parsed.query.q || '').trim();
+    var location = (parsed.query.location || '').trim();
+    var olderThan = parseInt(parsed.query.olderThan, 10);
+    var youngerThan = parseInt(parsed.query.youngerThan, 10);
+    var includeInactive = parsed.query.includeInactive === '1' || parsed.query.includeInactive === 'true';
+    var sort = (parsed.query.sort || 'date').trim();
+    var limit = Math.min(parseInt(parsed.query.limit, 10) || 200, 500);
+
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable', items: [] })); return; }
+      var filter = { code: iCode };
+
+      // Status filter — active only unless the "Include deleted or sold items" box is checked
+      if(!includeInactive){
+        filter.status = 'active';
+      }
+
+      // Text search — matches any of sku, asin, isbn, title, author.
+      // Case-insensitive substring via $regex with escape.
+      if(q){
+        var re = new RegExp(escapeRegex(q), 'i');
+        filter.$or = [
+          { sku: re },
+          { asin: re },
+          { isbn: re },
+          { title: re },
+          { author: re }
+        ];
+      }
+
+      // Location filter — accepts "1-A" format → matches row + section
+      if(location){
+        var parts = location.split('-');
+        if(parts.length === 2){
+          var rowStr = parts[0].trim();
+          var secStr = parts[1].trim();
+          var rowAsInt = parseInt(rowStr, 10);
+          var rowCandidates = [rowStr, rowStr.toUpperCase(), rowStr.toLowerCase()];
+          if(!isNaN(rowAsInt)) rowCandidates.push(rowAsInt);
+          var secCandidates = [secStr, secStr.toUpperCase(), secStr.toLowerCase()];
+          filter['location.row'] = { $in: rowCandidates };
+          filter['location.section'] = { $in: secCandidates };
+        }
+      }
+
+      // Age filter — by createdAt
+      if(!isNaN(olderThan) && olderThan > 0){
+        filter.createdAt = filter.createdAt || {};
+        filter.createdAt.$lte = new Date(Date.now() - olderThan * 24 * 60 * 60 * 1000);
+      }
+      if(!isNaN(youngerThan) && youngerThan > 0){
+        filter.createdAt = filter.createdAt || {};
+        filter.createdAt.$gte = new Date(Date.now() - youngerThan * 24 * 60 * 60 * 1000);
+      }
+
+      // Sort
+      var sortSpec;
+      if(sort === 'dateOld') sortSpec = { createdAt: 1 };
+      else if(sort === 'author') sortSpec = { author: 1 };
+      else sortSpec = { createdAt: -1 }; // default: newest first
+
+      database.collection('warehouse_inventory').find(filter)
+        .project({
+          sku:1, title:1, author:1, isbn:1, asin:1, ebayItemId:1,
+          publisher:1, year:1, format:1, condition:1, price:1,
+          location:1, coverUrl:1, status:1, createdAt:1, listedOn:1
+        })
+        .sort(sortSpec)
+        .limit(limit)
+        .toArray()
+        .then(function(docs){
+          var items = docs.map(function(d){
+            return {
+              itemId: d._id,
+              sku: d.sku,
+              title: d.title || '',
+              author: d.author || '',
+              isbn: d.isbn || '',
+              asin: d.asin || '',
+              ebayItemId: d.ebayItemId || '',
+              publisher: d.publisher || '',
+              year: d.year || '',
+              format: d.format || '',
+              condition: d.condition || '',
+              price: d.price,
+              location: d.location || {},
+              coverUrl: d.coverUrl || '',
+              status: d.status || 'active',
+              createdAt: d.createdAt,
+              listedOn: d.listedOn || []
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({
+            items: items,
+            total: items.length,
+            limitHit: items.length >= limit
+          }));
+        })
+        .catch(function(e){
+          res.writeHead(200); res.end(JSON.stringify({ error: e.message, items: [] }));
+        });
+    });
+    return;
+  }
+
   if (pathname === '/my/warehouse-listings/delete' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var wCode = (data.code || '').toUpperCase();
