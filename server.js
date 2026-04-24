@@ -1014,7 +1014,14 @@ async function buildReceiptPdf(data){
   var year = String(book.year || '');
   var format = String(book.format || '');
   var isbn = String(book.isbn || '');
-  var salesRank = data.salesRank ? String(data.salesRank) : '';
+  // Format sales rank with thousand separators ("45231" → "45,231")
+  var salesRank = '';
+  if(data.salesRank){
+    var rn = parseInt(data.salesRank, 10);
+    if(!isNaN(rn) && rn > 0){
+      salesRank = rn.toLocaleString('en-US');
+    }
+  }
   var priceStr = '$' + parseFloat(data.price || 0).toFixed(2);
   var condition = String(data.condition || '').toUpperCase();
   var dateStr = String(data.dateStr || new Date().toLocaleDateString('en-US'));
@@ -4916,7 +4923,7 @@ var server = http.createServer(function(req, res) {
       var identifierType = isbn.length === 13 ? 'EAN' : 'ISBN';
       var opts = {
         hostname: 'sellingpartnerapi-na.amazon.com',
-        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifiersType=' + identifierType + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions',
+        path: '/catalog/2022-04-01/items?identifiers=' + isbn + '&identifiersType=' + identifierType + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID + '&includedData=attributes,images,summaries,dimensions,salesRanks',
         method: 'GET',
         headers: {
           'x-amz-access-token': accessToken,
@@ -4990,6 +4997,21 @@ var server = http.createServer(function(req, res) {
             var listPrice = null;
             if(attrs.list_price && attrs.list_price[0]) listPrice = parseFloat(attrs.list_price[0].value || 0);
 
+            // Sales rank — from salesRanks includedData. Amazon returns an array
+            // of rank entries, each with a classificationRanks and displayGroupRanks.
+            // We want the "Books" top-level rank (displayGroupRanks) — the one shown
+            // as "#45,231 in Books" on the product page. Sub-category ranks live in
+            // classificationRanks; we ignore those for now.
+            var salesRank = null;
+            var salesRanks = item.salesRanks || [];
+            if(salesRanks.length > 0){
+              var sr = salesRanks[0]; // first marketplace entry
+              var dg = sr.displayGroupRanks || [];
+              if(dg.length > 0 && dg[0].rank){
+                salesRank = dg[0].rank;
+              }
+            }
+
             res.writeHead(200); res.end(JSON.stringify({
               asin: asin,
               isbn: isbn,
@@ -5005,7 +5027,8 @@ var server = http.createServer(function(req, res) {
               series: series,
               coverUrl: coverUrl,
               widthInches: widthInches,
-              listPrice: listPrice
+              listPrice: listPrice,
+              salesRank: salesRank
             }));
           } catch(e){ res.writeHead(200); res.end(JSON.stringify({ error: 'Parse error: ' + e.message })); }
         });
