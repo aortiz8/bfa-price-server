@@ -1069,20 +1069,31 @@ async function buildReceiptPdf(data){
   if(format) metaRows.push(['Format', format]);
   if(salesRank) metaRows.push(['Sales Rank', '#' + salesRank]);
 
-  // Calculate total page height by summing section heights
-  var hCornerItemNums = 42;    // the big #55 #55 line
-  var hLocationRow = 22;       // medium ROW SEC ITEM line
+  // Target total page height ~7 inches (504pt). This gives breathing room and
+  // makes room for the mirrored bottom zone. We compute content height, then
+  // pad as needed to reach 504pt.
+  var PAGE_H_TARGET = 504; // 7 inches in points
+
+  // Content section heights (top zone + middle zone)
+  var hCornerItemNums = 42;
+  var hLocationRow = 22;
   var hBarcodeBlock = codeImageBytes ? (codeImageH + 22) : 22;
-  var hDivider = 12;           // horizontal rule + padding
+  var hDivider = 12;
   var hTitleLines = titleLinesUsed * 14 + 4;
   var hAuthor = author ? 14 : 0;
   var hMeta = metaRows.length * 13 + 6;
   var hPriceBlock = 40;
   var hFooter = employeeName ? 28 : 16;
 
-  var PAGE_H = hCornerItemNums + hLocationRow + hBarcodeBlock
+  // Bottom mirrored zone matches the top location zone (without extra spacing)
+  var hBottomZone = hCornerItemNums + hLocationRow + hBarcodeBlock;
+
+  var contentH = hCornerItemNums + hLocationRow + hBarcodeBlock
              + hDivider + hTitleLines + hAuthor + hMeta
-             + hPriceBlock + hFooter + 30; // + top/bottom padding
+             + hPriceBlock + hFooter + hBottomZone + 60; // baseline padding
+
+  // Pad to 7" if content is shorter
+  var PAGE_H = Math.max(contentH, PAGE_H_TARGET);
 
   var page = pdfDoc.addPage([PAGE_W, PAGE_H]);
   var cursorY = PAGE_H - 8; // start near top
@@ -1209,6 +1220,61 @@ async function buildReceiptPdf(data){
   page.drawText(dateStr, {
     x: MARGIN, y: cursorY - 9,
     size: 9, font: fontMono, color: rgb(0.5, 0.5, 0.5)
+  });
+
+  // ── 9. BOTTOM LOCATION ZONE (duplicate of top, NOT rotated) ──
+  // So worker can see location info at both ends of the slip without flipping.
+  // Draws at fixed position from bottom of page, leaving whitespace between
+  // this and section 8 above.
+  var bottomY = 12; // distance from bottom edge of page
+
+  // Compute heights we need to stack from bottom up:
+  //   SKU text (~14pt) → barcode/QR (codeImageH) → location line (~locSize)
+  //   → gap → item# corners (~itemNumSize)
+  //
+  // We'll position each element at decreasing Y as we go UP from bottom.
+  var by = bottomY;
+
+  // SKU text (bottom-most element)
+  var bSkuSize = 14;
+  var bSkuW = fontMonoBold.widthOfTextAtSize(sku, bSkuSize);
+  page.drawText(sku, {
+    x: MARGIN + (CONTENT_W - bSkuW) / 2,
+    y: by,
+    size: bSkuSize, font: fontMonoBold, color: rgb(0,0,0)
+  });
+  by += bSkuSize + 6;
+
+  // Barcode or QR code
+  if(codeImageBytes){
+    var bCodeImage = await pdfDoc.embedPng(codeImageBytes);
+    var bImgX = MARGIN + (CONTENT_W - codeImageW) / 2;
+    page.drawImage(bCodeImage, {
+      x: bImgX, y: by,
+      width: codeImageW, height: codeImageH
+    });
+    by += codeImageH + 8;
+  }
+
+  // Location line (ROW: X  SEC: Y  #Z)
+  var bLocTxt = 'ROW: ' + locRow + '    SEC: ' + locSec + '    #' + locSeq;
+  var bLocW = fontBold.widthOfTextAtSize(bLocTxt, locSize);
+  page.drawText(bLocTxt, {
+    x: MARGIN + (CONTENT_W - bLocW) / 2,
+    y: by,
+    size: locSize, font: fontBold, color: rgb(0,0,0)
+  });
+  by += locSize + 8;
+
+  // Item # in both corners (BIG)
+  var bItemW = fontBold.widthOfTextAtSize(itemNumTxt, itemNumSize);
+  page.drawText(itemNumTxt, {
+    x: MARGIN, y: by,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
+  });
+  page.drawText(itemNumTxt, {
+    x: PAGE_W - MARGIN - bItemW, y: by,
+    size: itemNumSize, font: fontBold, color: rgb(0,0,0)
   });
 
   var bytes = await pdfDoc.save();
