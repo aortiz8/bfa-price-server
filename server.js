@@ -7530,14 +7530,10 @@ var server = http.createServer(function(req, res) {
             if(!ebayBook.isbn && (sp['isbn'] || sp['isbn-13'] || sp['isbn-10'])) ebayBook.isbn = sp['isbn'] || sp['isbn-13'] || sp['isbn-10'];
             if(!ebayBook.publisher && sp['publisher']) ebayBook.publisher = sp['publisher'];
 
-            // Synopsis: ask Claude. summarizeEbayDescription handles both
-            // cases — uses the description if we have one, otherwise asks
-            // Claude to identify the real book inside the messy listing
-            // title and write from its own knowledge.
-            summarizeEbayDescription(details.description || '', ebayBook.title, function(sumErr, synopsis){
-              if(synopsis) ebayBook.synopsis = synopsis;
-              res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
-            });
+            // Done. Return immediately with cover + specifics.
+            // Synopsis is fetched separately by the frontend via /my/social/synopsis
+            // so the card can render quickly.
+            res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
           });
         });
       })
@@ -7573,17 +7569,23 @@ var server = http.createServer(function(req, res) {
 
       // Strict-JSON prompt — Claude must say "I don't know this book" rather than
       // invent plot details if the book isn't recognized.
+      // Title may be a clean book title OR a messy eBay listing title with
+      // seller-marketing words (SIGNED, AUTOGRAPHED, FIRST EDITION, RARE,
+      // numbers like "16X", trailing additions like "+ OTHERS"). Claude is
+      // instructed to identify the real book within the title first.
       var userPrompt =
-        'Write a short plot synopsis for this used book that we will post on Instagram for our bookmobile-style used bookstore.\n\n'
-        + 'BOOK:\n'
+        'Write a 2 to 3 sentence Instagram caption describing what this used book is about, for our bookmobile-style used bookstore.\n\n'
+        + 'BOOK INFO (Title may be an eBay listing title with seller-marketing words like SIGNED, AUTOGRAPHED, FIRST EDITION, RARE, NEW, numbers like "16X", or trailing additions like "+ OTHERS". Identify the actual book title before writing.):\n'
         + 'Title: ' + title + '\n'
         + (author ? 'Author: ' + author + '\n' : '')
         + (year   ? 'Year: '   + year   + '\n' : '')
         + (isbn   ? 'ISBN: '   + isbn   + '\n' : '')
         + '\nRULES:\n'
-        + '- 2 to 4 sentences. Describe what the book is actually about. No marketing fluff. No exclamation points. No "you will love this".\n'
-        + '- Casual, warm, English only. Do not use Spanish.\n'
-        + '- If you are NOT confident this is a real book that you know, do not guess. Set confident to false.\n'
+        + '- Step 1: identify the real book within the title (strip out marketing words).\n'
+        + '- Step 2: if you confidently know the book, write a 2 to 3 sentence Instagram caption about what it is actually about.\n'
+        + '- 2 to 3 sentences. Casual, warm, English only. No exclamation points. No "you will love this". No Spanish.\n'
+        + '- Use only what you genuinely know about the real book. Do not invent plot details.\n'
+        + '- If after stripping marketing words you cannot confidently identify the book, OR you do not know enough about it, set confident to false.\n'
         + '- Output strict JSON only. No prose, no code fences, no commentary.\n\n'
         + 'Output schema:\n'
         + '{ "confident": true|false, "synopsis": "..." }';
