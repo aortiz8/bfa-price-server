@@ -7574,7 +7574,7 @@ var server = http.createServer(function(req, res) {
       // numbers like "16X", trailing additions like "+ OTHERS"). Claude is
       // instructed to identify the real book within the title first.
       var userPrompt =
-        'Write a 2 to 3 sentence Instagram caption describing what this used book is about, for our bookmobile-style used bookstore.\n\n'
+        'Write a 2 to 3 sentence Instagram caption describing this used book, for our bookmobile-style used bookstore.\n\n'
         + 'BOOK INFO (Title may be an eBay listing title with seller-marketing words like SIGNED, AUTOGRAPHED, FIRST EDITION, RARE, NEW, numbers like "16X", or trailing additions like "+ OTHERS". Identify the actual book title before writing.):\n'
         + 'Title: ' + title + '\n'
         + (author ? 'Author: ' + author + '\n' : '')
@@ -7582,10 +7582,13 @@ var server = http.createServer(function(req, res) {
         + (isbn   ? 'ISBN: '   + isbn   + '\n' : '')
         + '\nRULES:\n'
         + '- Step 1: identify the real book within the title (strip out marketing words).\n'
-        + '- Step 2: if you confidently know the book, write a 2 to 3 sentence Instagram caption about what it is actually about.\n'
+        + '- Step 2: write a 2 to 3 sentence Instagram caption.\n'
+        + '   • For FICTION you recognize: describe the plot/story at a high level.\n'
+        + '   • For NON-FICTION you recognize: describe the topic/subject and what kind of book it is (reference, history, memoir, photo book, etc.).\n'
+        + '   • For non-fiction where you know the SUBJECT but not exact contents, it is fine to describe what the topic is (e.g., "A pictorial history of the Flying Tigers, the American volunteer pilots who fought in China during WWII"). This is NOT inventing — it is summarizing what the title and author tell us.\n'
         + '- 2 to 3 sentences. Casual, warm, English only. No exclamation points. No "you will love this". No Spanish.\n'
-        + '- Use only what you genuinely know about the real book. Do not invent plot details.\n'
-        + '- If after stripping marketing words you cannot confidently identify the book, OR you do not know enough about it, set confident to false.\n'
+        + '- Do not invent specific plot details, character names, or quotes you are not sure about.\n'
+        + '- Set confident to false ONLY if you cannot even identify what topic or kind of book this is after stripping the marketing words.\n'
         + '- Output strict JSON only. No prose, no code fences, no commentary.\n\n'
         + 'Output schema:\n'
         + '{ "confident": true|false, "synopsis": "..." }';
