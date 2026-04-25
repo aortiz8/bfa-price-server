@@ -2495,10 +2495,9 @@ function fetchRecentEbayOrders(subscriberCode, sinceIso, cb){
 
 // Look up a sold eBay listing by SKU within the last N days. Used by Social
 // Posts when a SKU isn't in our MongoDB (e.g. legacy MX/UP/0/5 inventory).
-// Pulls the full Transaction block from eBay so we can extract title,
-// picture, price, and ItemSpecifics (author, year, format, ISBN, publisher).
-// Returns book object shaped like a warehouse_inventory record, or null if
-// no sale found.
+// Pulls orders page-by-page (eBay caps each page at 100 orders) and stops as
+// soon as we find a Transaction with the matching SKU. Hard cap at 20 pages
+// (~2000 orders) so we don't loop forever on bad input.
 function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
   if(!targetSku){ cb('SKU required', null); return; }
   daysBack = daysBack || 14;
@@ -2507,120 +2506,146 @@ function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
     var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
     if(!token){ cb('No eBay token', null); return; }
     var sinceIso = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
-    var xml = '<?xml version="1.0" encoding="utf-8"?>'
-      + '<GetOrdersRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
-      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
-      +   '<CreateTimeFrom>' + sinceIso + '</CreateTimeFrom>'
-      +   '<CreateTimeTo>' + new Date().toISOString() + '</CreateTimeTo>'
-      +   '<OrderStatus>All</OrderStatus>'
-      +   '<DetailLevel>ReturnAll</DetailLevel>'
-      + '</GetOrdersRequest>';
-    var opts = {
-      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
-      headers: {
-        'X-EBAY-API-CALL-NAME': 'GetOrders',
-        'X-EBAY-API-SITEID': '0',
-        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
-        'X-EBAY-API-IAF-TOKEN': token,
-        'Content-Type': 'text/xml',
-        'Content-Length': Buffer.byteLength(xml)
-      }
-    };
-    var eReq = https.request(opts, function(r){
-      var data = '';
-      r.on('data', function(c){ data += c; });
-      r.on('end', function(){
-        // Debug: log overall response shape so we can see WHY a SKU isn't found
-        var ackMatchDbg = data.match(/<Ack>([^<]+)<\/Ack>/);
-        var skusInResponse = [];
-        var reAllSku = /<SKU>([^<]+)<\/SKU>/g;
-        var allSkuM;
-        while((allSkuM = reAllSku.exec(data)) !== null){ skusInResponse.push(allSkuM[1]); }
-        console.log('[findEbaySoldBookBySku] target=' + targetSku
-          + ' ack=' + (ackMatchDbg ? ackMatchDbg[1] : 'none')
-          + ' skusFound=' + skusInResponse.length
-          + ' first10=' + skusInResponse.slice(0, 10).join(','));
+    var nowIso = new Date().toISOString();
+    var targetUpper = targetSku.toUpperCase();
+    var totalSkusScanned = 0;
+    var maxPages = 20;
 
-        // Walk Orders → Transactions, looking for one with matching SKU.
-        var targetUpper = targetSku.toUpperCase();
-        var reOrder = /<Order>([\s\S]*?)<\/Order>/g;
-        var orderMatch;
-        while((orderMatch = reOrder.exec(data)) !== null){
-          var orderBlock = orderMatch[1];
-          var orderIdM = orderBlock.match(/<OrderID>([^<]+)<\/OrderID>/);
-          var createdM = orderBlock.match(/<CreatedTime>([^<]+)<\/CreatedTime>/);
-          var reTx = /<Transaction>([\s\S]*?)<\/Transaction>/g;
-          var txMatch;
-          while((txMatch = reTx.exec(orderBlock)) !== null){
-            var txBlock = txMatch[1];
-            var skuM = txBlock.match(/<SKU>([^<]+)<\/SKU>/);
-            if(!skuM) continue;
-            if(skuM[1].toUpperCase() !== targetUpper) continue;
+    function fetchPage(pageNum){
+      var xml = '<?xml version="1.0" encoding="utf-8"?>'
+        + '<GetOrdersRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+        +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+        +   '<CreateTimeFrom>' + sinceIso + '</CreateTimeFrom>'
+        +   '<CreateTimeTo>' + nowIso + '</CreateTimeTo>'
+        +   '<OrderStatus>All</OrderStatus>'
+        +   '<DetailLevel>ReturnAll</DetailLevel>'
+        +   '<Pagination>'
+        +     '<EntriesPerPage>100</EntriesPerPage>'
+        +     '<PageNumber>' + pageNum + '</PageNumber>'
+        +   '</Pagination>'
+        + '</GetOrdersRequest>';
+      var opts = {
+        hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+        headers: {
+          'X-EBAY-API-CALL-NAME': 'GetOrders',
+          'X-EBAY-API-SITEID': '0',
+          'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+          'X-EBAY-API-IAF-TOKEN': token,
+          'Content-Type': 'text/xml',
+          'Content-Length': Buffer.byteLength(xml)
+        }
+      };
+      var eReq = https.request(opts, function(r){
+        var data = '';
+        r.on('data', function(c){ data += c; });
+        r.on('end', function(){
+          // Diagnostic: log per-page progress
+          var ackMatchDbg = data.match(/<Ack>([^<]+)<\/Ack>/);
+          var hasMoreM = data.match(/<HasMoreOrders>([^<]+)<\/HasMoreOrders>/);
+          var totalPagesM = data.match(/<TotalNumberOfPages>(\d+)<\/TotalNumberOfPages>/);
+          var pageSkus = [];
+          var reAllSku = /<SKU>([^<]+)<\/SKU>/g;
+          var allSkuM;
+          while((allSkuM = reAllSku.exec(data)) !== null){ pageSkus.push(allSkuM[1]); }
+          totalSkusScanned += pageSkus.length;
+          console.log('[findEbaySoldBookBySku] target=' + targetSku
+            + ' page=' + pageNum + '/' + (totalPagesM ? totalPagesM[1] : '?')
+            + ' ack=' + (ackMatchDbg ? ackMatchDbg[1] : 'none')
+            + ' skusOnPage=' + pageSkus.length
+            + ' hasMore=' + (hasMoreM ? hasMoreM[1] : 'none'));
 
-            // Found it. Pull as much info as we can.
-            var titleM = txBlock.match(/<Item>[\s\S]*?<Title>([^<]+)<\/Title>/);
-            var itemIdM = txBlock.match(/<Item>[\s\S]*?<ItemID>([^<]+)<\/ItemID>/);
-            var priceM = txBlock.match(/<TransactionPrice[^>]*>([^<]+)<\/TransactionPrice>/);
-            var qtyM = txBlock.match(/<QuantityPurchased>(\d+)<\/QuantityPurchased>/);
+          // Walk Orders → Transactions on this page
+          var reOrder = /<Order>([\s\S]*?)<\/Order>/g;
+          var orderMatch;
+          while((orderMatch = reOrder.exec(data)) !== null){
+            var orderBlock = orderMatch[1];
+            var orderIdM = orderBlock.match(/<OrderID>([^<]+)<\/OrderID>/);
+            var createdM = orderBlock.match(/<CreatedTime>([^<]+)<\/CreatedTime>/);
+            var reTx = /<Transaction>([\s\S]*?)<\/Transaction>/g;
+            var txMatch;
+            while((txMatch = reTx.exec(orderBlock)) !== null){
+              var txBlock = txMatch[1];
+              var skuMatchInner = txBlock.match(/<SKU>([^<]+)<\/SKU>/);
+              if(!skuMatchInner) continue;
+              if(skuMatchInner[1].toUpperCase() !== targetUpper) continue;
 
-            // Pictures — first PictureURL inside Item/PictureDetails
-            var pictureUrl = '';
-            var picBlock = txBlock.match(/<PictureDetails>([\s\S]*?)<\/PictureDetails>/);
-            if(picBlock){
-              var picUrlM = picBlock[1].match(/<PictureURL>([^<]+)<\/PictureURL>/);
-              if(picUrlM) pictureUrl = picUrlM[1];
-            }
-            // Fallback: GalleryURL if PictureURL not present
-            if(!pictureUrl){
-              var galleryM = txBlock.match(/<GalleryURL>([^<]+)<\/GalleryURL>/);
-              if(galleryM) pictureUrl = galleryM[1];
-            }
+              // Found it. Pull as much info as we can.
+              var titleM = txBlock.match(/<Item>[\s\S]*?<Title>([^<]+)<\/Title>/);
+              var itemIdM = txBlock.match(/<Item>[\s\S]*?<ItemID>([^<]+)<\/ItemID>/);
+              var priceM = txBlock.match(/<TransactionPrice[^>]*>([^<]+)<\/TransactionPrice>/);
+              var qtyM = txBlock.match(/<QuantityPurchased>(\d+)<\/QuantityPurchased>/);
 
-            // ItemSpecifics — pull values for the fields we care about.
-            // Each <NameValueList> has <Name>X</Name><Value>Y</Value>.
-            var specifics = {};
-            var specBlock = txBlock.match(/<ItemSpecifics>([\s\S]*?)<\/ItemSpecifics>/);
-            if(specBlock){
-              var reNvl = /<NameValueList>([\s\S]*?)<\/NameValueList>/g;
-              var nvl;
-              while((nvl = reNvl.exec(specBlock[1])) !== null){
-                var nameM = nvl[1].match(/<Name>([^<]+)<\/Name>/);
-                var valM = nvl[1].match(/<Value>([^<]+)<\/Value>/);
-                if(nameM && valM){ specifics[nameM[1].trim().toLowerCase()] = valM[1].trim(); }
+              var pictureUrl = '';
+              var picBlock = txBlock.match(/<PictureDetails>([\s\S]*?)<\/PictureDetails>/);
+              if(picBlock){
+                var picUrlM = picBlock[1].match(/<PictureURL>([^<]+)<\/PictureURL>/);
+                if(picUrlM) pictureUrl = picUrlM[1];
               }
-            }
+              if(!pictureUrl){
+                var galleryM = txBlock.match(/<GalleryURL>([^<]+)<\/GalleryURL>/);
+                if(galleryM) pictureUrl = galleryM[1];
+              }
 
-            var book = {
-              sku: skuM[1],
-              title: titleM ? titleM[1] : '',
-              author: specifics['author'] || '',
-              year: specifics['publication year'] || specifics['year'] || '',
-              format: specifics['format'] || specifics['binding'] || '',
-              isbn: specifics['isbn'] || specifics['isbn-13'] || specifics['isbn-10'] || '',
-              publisher: specifics['publisher'] || '',
-              coverUrl: pictureUrl,
-              price: priceM ? parseFloat(priceM[1]) : null,
-              status: 'sold',
-              ebayItemId: itemIdM ? itemIdM[1] : '',
-              soldOrderId: orderIdM ? orderIdM[1] : '',
-              soldAt: createdM ? createdM[1] : '',
-              quantity: qtyM ? parseInt(qtyM[1], 10) : 1,
-              _fromEbay: true
-            };
-            cb(null, book);
+              // ItemSpecifics — pull values for the fields we care about.
+              var specifics = {};
+              var specBlock = txBlock.match(/<ItemSpecifics>([\s\S]*?)<\/ItemSpecifics>/);
+              if(specBlock){
+                var reNvl = /<NameValueList>([\s\S]*?)<\/NameValueList>/g;
+                var nvl;
+                while((nvl = reNvl.exec(specBlock[1])) !== null){
+                  var nameM = nvl[1].match(/<Name>([^<]+)<\/Name>/);
+                  var valM = nvl[1].match(/<Value>([^<]+)<\/Value>/);
+                  if(nameM && valM){ specifics[nameM[1].trim().toLowerCase()] = valM[1].trim(); }
+                }
+              }
+
+              console.log('[findEbaySoldBookBySku] HIT on page ' + pageNum
+                + ' — sku=' + skuMatchInner[1]
+                + ' title=' + (titleM ? titleM[1].slice(0, 60) : 'none'));
+
+              var book = {
+                sku: skuMatchInner[1],
+                title: titleM ? titleM[1] : '',
+                author: specifics['author'] || '',
+                year: specifics['publication year'] || specifics['year'] || '',
+                format: specifics['format'] || specifics['binding'] || '',
+                isbn: specifics['isbn'] || specifics['isbn-13'] || specifics['isbn-10'] || '',
+                publisher: specifics['publisher'] || '',
+                coverUrl: pictureUrl,
+                price: priceM ? parseFloat(priceM[1]) : null,
+                status: 'sold',
+                ebayItemId: itemIdM ? itemIdM[1] : '',
+                soldOrderId: orderIdM ? orderIdM[1] : '',
+                soldAt: createdM ? createdM[1] : '',
+                quantity: qtyM ? parseInt(qtyM[1], 10) : 1,
+                _fromEbay: true
+              };
+              cb(null, book);
+              return;
+            }
+          }
+
+          // Not on this page — fetch next page if there is one
+          var hasMore = hasMoreM && hasMoreM[1] === 'true';
+          if(hasMore && pageNum < maxPages){
+            fetchPage(pageNum + 1);
             return;
           }
-        }
-        // No matching SKU found in last N days
-        console.log('[findEbaySoldBookBySku] no match for ' + targetSku + ' in ' + skusInResponse.length + ' SKUs returned');
-        cb(null, null);
+          // Out of pages or hit cap — give up
+          console.log('[findEbaySoldBookBySku] no match for ' + targetSku
+            + ' after ' + pageNum + ' page(s), ' + totalSkusScanned + ' SKUs scanned');
+          cb(null, null);
+        });
       });
-    });
-    eReq.on('error', function(e){ cb(e.message, null); });
-    eReq.setTimeout(30000, function(){ eReq.destroy(); cb('Timeout', null); });
-    eReq.write(xml); eReq.end();
+      eReq.on('error', function(e){ cb(e.message, null); });
+      eReq.setTimeout(30000, function(){ eReq.destroy(); cb('Timeout', null); });
+      eReq.write(xml); eReq.end();
+    }
+
+    fetchPage(1);
   });
 }
+
 
 // End an eBay listing by ItemID via Trading API EndItem
 function endEbayListing(subscriberCode, itemId, cb){
