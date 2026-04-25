@@ -2493,6 +2493,123 @@ function fetchRecentEbayOrders(subscriberCode, sinceIso, cb){
   });
 }
 
+// Look up a sold eBay listing by SKU within the last N days. Used by Social
+// Posts when a SKU isn't in our MongoDB (e.g. legacy MX/UP/0/5 inventory).
+// Pulls the full Transaction block from eBay so we can extract title,
+// picture, price, and ItemSpecifics (author, year, format, ISBN, publisher).
+// Returns book object shaped like a warehouse_inventory record, or null if
+// no sale found.
+function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
+  if(!targetSku){ cb('SKU required', null); return; }
+  daysBack = daysBack || 14;
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found', null); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    if(!token){ cb('No eBay token', null); return; }
+    var sinceIso = new Date(Date.now() - daysBack * 24 * 60 * 60 * 1000).toISOString();
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetOrdersRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<CreateTimeFrom>' + sinceIso + '</CreateTimeFrom>'
+      +   '<CreateTimeTo>' + new Date().toISOString() + '</CreateTimeTo>'
+      +   '<OrderStatus>All</OrderStatus>'
+      +   '<DetailLevel>ReturnAll</DetailLevel>'
+      + '</GetOrdersRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetOrders',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        // Walk Orders → Transactions, looking for one with matching SKU.
+        var targetUpper = targetSku.toUpperCase();
+        var reOrder = /<Order>([\s\S]*?)<\/Order>/g;
+        var orderMatch;
+        while((orderMatch = reOrder.exec(data)) !== null){
+          var orderBlock = orderMatch[1];
+          var orderIdM = orderBlock.match(/<OrderID>([^<]+)<\/OrderID>/);
+          var createdM = orderBlock.match(/<CreatedTime>([^<]+)<\/CreatedTime>/);
+          var reTx = /<Transaction>([\s\S]*?)<\/Transaction>/g;
+          var txMatch;
+          while((txMatch = reTx.exec(orderBlock)) !== null){
+            var txBlock = txMatch[1];
+            var skuM = txBlock.match(/<SKU>([^<]+)<\/SKU>/);
+            if(!skuM) continue;
+            if(skuM[1].toUpperCase() !== targetUpper) continue;
+
+            // Found it. Pull as much info as we can.
+            var titleM = txBlock.match(/<Item>[\s\S]*?<Title>([^<]+)<\/Title>/);
+            var itemIdM = txBlock.match(/<Item>[\s\S]*?<ItemID>([^<]+)<\/ItemID>/);
+            var priceM = txBlock.match(/<TransactionPrice[^>]*>([^<]+)<\/TransactionPrice>/);
+            var qtyM = txBlock.match(/<QuantityPurchased>(\d+)<\/QuantityPurchased>/);
+
+            // Pictures — first PictureURL inside Item/PictureDetails
+            var pictureUrl = '';
+            var picBlock = txBlock.match(/<PictureDetails>([\s\S]*?)<\/PictureDetails>/);
+            if(picBlock){
+              var picUrlM = picBlock[1].match(/<PictureURL>([^<]+)<\/PictureURL>/);
+              if(picUrlM) pictureUrl = picUrlM[1];
+            }
+            // Fallback: GalleryURL if PictureURL not present
+            if(!pictureUrl){
+              var galleryM = txBlock.match(/<GalleryURL>([^<]+)<\/GalleryURL>/);
+              if(galleryM) pictureUrl = galleryM[1];
+            }
+
+            // ItemSpecifics — pull values for the fields we care about.
+            // Each <NameValueList> has <Name>X</Name><Value>Y</Value>.
+            var specifics = {};
+            var specBlock = txBlock.match(/<ItemSpecifics>([\s\S]*?)<\/ItemSpecifics>/);
+            if(specBlock){
+              var reNvl = /<NameValueList>([\s\S]*?)<\/NameValueList>/g;
+              var nvl;
+              while((nvl = reNvl.exec(specBlock[1])) !== null){
+                var nameM = nvl[1].match(/<Name>([^<]+)<\/Name>/);
+                var valM = nvl[1].match(/<Value>([^<]+)<\/Value>/);
+                if(nameM && valM){ specifics[nameM[1].trim().toLowerCase()] = valM[1].trim(); }
+              }
+            }
+
+            var book = {
+              sku: skuM[1],
+              title: titleM ? titleM[1] : '',
+              author: specifics['author'] || '',
+              year: specifics['publication year'] || specifics['year'] || '',
+              format: specifics['format'] || specifics['binding'] || '',
+              isbn: specifics['isbn'] || specifics['isbn-13'] || specifics['isbn-10'] || '',
+              publisher: specifics['publisher'] || '',
+              coverUrl: pictureUrl,
+              price: priceM ? parseFloat(priceM[1]) : null,
+              status: 'sold',
+              ebayItemId: itemIdM ? itemIdM[1] : '',
+              soldOrderId: orderIdM ? orderIdM[1] : '',
+              soldAt: createdM ? createdM[1] : '',
+              quantity: qtyM ? parseInt(qtyM[1], 10) : 1,
+              _fromEbay: true
+            };
+            cb(null, book);
+            return;
+          }
+        }
+        // No matching SKU found in last N days
+        cb(null, null);
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message, null); });
+    eReq.setTimeout(30000, function(){ eReq.destroy(); cb('Timeout', null); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
 // End an eBay listing by ItemID via Trading API EndItem
 function endEbayListing(subscriberCode, itemId, cb){
   getSubscriber(subscriberCode, function(err, sub){
@@ -7090,7 +7207,8 @@ var server = http.createServer(function(req, res) {
   }
 
   // ── Social Posts: Lookup by SKU (for the "Make One" section) ──
-  // Returns: { found, status: 'active'|'sold'|'deleted'|'notfound', book: {...} }
+  // Lookup order: 1) MongoDB warehouse_inventory, 2) eBay sold orders (last 14d).
+  // Returns: { found, status: 'active'|'sold'|'deleted'|'notfound', book: {...}, source: 'mongo'|'ebay' }
   if (pathname === '/my/social/by-sku' && req.method === 'GET') {
     var bsCode = (parsed.query.code || '').toUpperCase();
     var bsSess = getRequestSession(req, parsed);
@@ -7107,30 +7225,42 @@ var server = http.createServer(function(req, res) {
         sku: { $regex: '^' + escapeRegex(skuQ) + '$', $options: 'i' }
       })
       .then(function(d){
-        if(!d){
-          res.writeHead(200); res.end(JSON.stringify({ found: false, status: 'notfound' }));
+        if(d){
+          // Found in Mongo — return as before
+          var book = {
+            _id: d._id,
+            sku: d.sku || '',
+            isbn: d.isbn || '',
+            asin: d.asin || '',
+            ebayItemId: d.ebayItemId || '',
+            title: d.title || '',
+            author: d.author || '',
+            publisher: d.publisher || '',
+            year: d.year || '',
+            format: d.format || '',
+            condition: d.condition || '',
+            price: d.price,
+            coverUrl: d.coverUrl || '',
+            salesRank: d.salesRank || null,
+            synopsis: d.synopsis || '',
+            status: d.status || 'active',
+            createdAt: d.createdAt
+          };
+          res.writeHead(200); res.end(JSON.stringify({ found: true, status: book.status, book: book, source: 'mongo' }));
           return;
         }
-        var book = {
-          _id: d._id,
-          sku: d.sku || '',
-          isbn: d.isbn || '',
-          asin: d.asin || '',
-          ebayItemId: d.ebayItemId || '',
-          title: d.title || '',
-          author: d.author || '',
-          publisher: d.publisher || '',
-          year: d.year || '',
-          format: d.format || '',
-          condition: d.condition || '',
-          price: d.price,
-          coverUrl: d.coverUrl || '',
-          salesRank: d.salesRank || null,
-          synopsis: d.synopsis || '',
-          status: d.status || 'active',
-          createdAt: d.createdAt
-        };
-        res.writeHead(200); res.end(JSON.stringify({ found: true, status: book.status, book: book }));
+        // Not in Mongo — try eBay sold orders (last 14 days).
+        findEbaySoldBookBySku(bsCode, skuQ, 14, function(ebayErr, ebayBook){
+          if(ebayErr){
+            res.writeHead(200); res.end(JSON.stringify({ found: false, status: 'notfound', error: 'eBay lookup failed: ' + ebayErr }));
+            return;
+          }
+          if(!ebayBook){
+            res.writeHead(200); res.end(JSON.stringify({ found: false, status: 'notfound' }));
+            return;
+          }
+          res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
+        });
       })
       .catch(function(e){
         res.writeHead(200); res.end(JSON.stringify({ error: e.message }));
