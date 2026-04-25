@@ -6345,6 +6345,7 @@ var server = http.createServer(function(req, res) {
             location: data.location || {},
             listedOn: data.listedOn || [],
             coverUrl: data.coverUrl || '',
+            salesRank: (data.salesRank != null && !isNaN(parseInt(data.salesRank, 10))) ? parseInt(data.salesRank, 10) : null,
             status: 'active',
             createdAt: new Date()
           };
@@ -7019,6 +7020,213 @@ var server = http.createServer(function(req, res) {
         .catch(function(e){
           res.writeHead(200); res.end(JSON.stringify({ error: e.message, items: [] }));
         });
+    });
+    return;
+  }
+
+  // ── Social Posts: Feed (filtered list of books for posting) ──
+  // Returns books from warehouse_inventory whose SKU starts with one of the
+  // four "interesting" prefixes — MX-, UP-, 0-, 5-. Regular bfa.xxxxxx SKUs
+  // are excluded from Browse on purpose; for those the user types the SKU
+  // into "Make One" instead.
+  // Query: code, status (active|sold|both, default both), hasCover (default 1), limit
+  if (pathname === '/my/social/feed' && req.method === 'GET') {
+    var sCode = (parsed.query.code || '').toUpperCase();
+    var sSess = getRequestSession(req, parsed);
+    if(!sSess || sSess.role !== 'admin' || sSess.subscriberCode !== sCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var statusF  = (parsed.query.status || 'both').toLowerCase();
+    var hasCover = parsed.query.hasCover !== '0' && parsed.query.hasCover !== 'false';
+    var limit    = Math.min(parseInt(parsed.query.limit, 10) || 60, 200);
+
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable', items: [] })); return; }
+
+      // Hardcoded SKU prefix filter — only "interesting" inventory shows in Browse.
+      var filter = {
+        code: sCode,
+        sku: { $regex: '^(MX|UP|0|5)-', $options: 'i' }
+      };
+      if(statusF === 'active')      filter.status = 'active';
+      else if(statusF === 'sold')   filter.status = 'sold';
+      else                          filter.status = { $in: ['active', 'sold'] };
+      if(hasCover){ filter.coverUrl = { $exists: true, $ne: '' }; }
+
+      database.collection('warehouse_inventory')
+        .find(filter)
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .toArray()
+        .then(function(docs){
+          var items = docs.map(function(d){
+            return {
+              _id: d._id,
+              sku: d.sku || '',
+              isbn: d.isbn || '',
+              asin: d.asin || '',
+              ebayItemId: d.ebayItemId || '',
+              title: d.title || '',
+              author: d.author || '',
+              publisher: d.publisher || '',
+              year: d.year || '',
+              format: d.format || '',
+              condition: d.condition || '',
+              price: d.price,
+              coverUrl: d.coverUrl || '',
+              salesRank: d.salesRank || null,
+              synopsis: d.synopsis || '',
+              status: d.status || 'active',
+              createdAt: d.createdAt
+            };
+          });
+          res.writeHead(200); res.end(JSON.stringify({ items: items, total: items.length }));
+        })
+        .catch(function(e){
+          res.writeHead(200); res.end(JSON.stringify({ error: e.message, items: [] }));
+        });
+    });
+    return;
+  }
+
+  // ── Social Posts: Lookup by SKU (for the "Make One" section) ──
+  // Returns: { found, status: 'active'|'sold'|'deleted'|'notfound', book: {...} }
+  if (pathname === '/my/social/by-sku' && req.method === 'GET') {
+    var bsCode = (parsed.query.code || '').toUpperCase();
+    var bsSess = getRequestSession(req, parsed);
+    if(!bsSess || bsSess.role !== 'admin' || bsSess.subscriberCode !== bsCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var skuQ = (parsed.query.sku || '').trim();
+    if(!skuQ){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing sku' })); return; }
+
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+      database.collection('warehouse_inventory').findOne({
+        code: bsCode,
+        sku: { $regex: '^' + escapeRegex(skuQ) + '$', $options: 'i' }
+      })
+      .then(function(d){
+        if(!d){
+          res.writeHead(200); res.end(JSON.stringify({ found: false, status: 'notfound' }));
+          return;
+        }
+        var book = {
+          _id: d._id,
+          sku: d.sku || '',
+          isbn: d.isbn || '',
+          asin: d.asin || '',
+          ebayItemId: d.ebayItemId || '',
+          title: d.title || '',
+          author: d.author || '',
+          publisher: d.publisher || '',
+          year: d.year || '',
+          format: d.format || '',
+          condition: d.condition || '',
+          price: d.price,
+          coverUrl: d.coverUrl || '',
+          salesRank: d.salesRank || null,
+          synopsis: d.synopsis || '',
+          status: d.status || 'active',
+          createdAt: d.createdAt
+        };
+        res.writeHead(200); res.end(JSON.stringify({ found: true, status: book.status, book: book }));
+      })
+      .catch(function(e){
+        res.writeHead(200); res.end(JSON.stringify({ error: e.message }));
+      });
+    });
+    return;
+  }
+
+  // ── Social Posts: Generate synopsis via Claude API ──
+  // Body: { code, itemId?, title, author, year, isbn? }
+  // - Asks Claude for a 2-4 sentence English plot synopsis.
+  // - If Claude isn't confident the book is real, returns { confident:false }.
+  // - Caches confident synopses on the warehouse_inventory record (synopsis field)
+  //   so we only call Claude once per book.
+  if (pathname === '/my/social/synopsis' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var synCode = (data.code || '').toUpperCase();
+      var synSess = getRequestSession(req, parsed);
+      if(!synSess || synSess.role !== 'admin' || synSess.subscriberCode !== synCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      if(!ANTHROPIC_KEY){
+        res.writeHead(200); res.end(JSON.stringify({ confident: false, error: 'No Anthropic key configured' })); return;
+      }
+      var title  = (data.title  || '').trim();
+      var author = (data.author || '').trim();
+      var year   = (data.year   || '').toString().trim();
+      var isbn   = (data.isbn   || '').trim();
+      var itemId = (data.itemId || '').toString().trim();
+      if(!title){ res.writeHead(400); res.end(JSON.stringify({ error: 'Missing title' })); return; }
+
+      // Strict-JSON prompt — Claude must say "I don't know this book" rather than
+      // invent plot details if the book isn't recognized.
+      var userPrompt =
+        'Write a short plot synopsis for this used book that we will post on Instagram for our bookmobile-style used bookstore.\n\n'
+        + 'BOOK:\n'
+        + 'Title: ' + title + '\n'
+        + (author ? 'Author: ' + author + '\n' : '')
+        + (year   ? 'Year: '   + year   + '\n' : '')
+        + (isbn   ? 'ISBN: '   + isbn   + '\n' : '')
+        + '\nRULES:\n'
+        + '- 2 to 4 sentences. Describe what the book is actually about. No marketing fluff. No exclamation points. No "you will love this".\n'
+        + '- Casual, warm, English only. Do not use Spanish.\n'
+        + '- If you are NOT confident this is a real book that you know, do not guess. Set confident to false.\n'
+        + '- Output strict JSON only. No prose, no code fences, no commentary.\n\n'
+        + 'Output schema:\n'
+        + '{ "confident": true|false, "synopsis": "..." }';
+
+      var payload = {
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 400,
+        messages: [{ role: 'user', content: userPrompt }]
+      };
+      var postData = JSON.stringify(payload);
+      var opts = {
+        hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'Content-Length': Buffer.byteLength(postData) }
+      };
+      var apiReq = https.request(opts, function(apiRes){
+        var raw = '';
+        apiRes.on('data', function(c){ raw += c; });
+        apiRes.on('end', function(){
+          var confident = false, synopsis = '';
+          try {
+            var json = JSON.parse(raw);
+            var text = (json.content && json.content[0] && json.content[0].text) || '';
+            text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+            var parsed2 = JSON.parse(text);
+            if(parsed2 && parsed2.confident === true && typeof parsed2.synopsis === 'string' && parsed2.synopsis.trim()){
+              confident = true;
+              synopsis = parsed2.synopsis.trim();
+            }
+          } catch(e){
+            // Parse failure → not confident, no synopsis
+          }
+
+          if(confident && synopsis && itemId){
+            connectMongo(function(err2, database){
+              if(database){
+                try {
+                  var mongodb = require('mongodb');
+                  database.collection('warehouse_inventory').updateOne(
+                    { _id: new mongodb.ObjectId(itemId), code: synCode },
+                    { $set: { synopsis: synopsis, synopsisAt: new Date() } }
+                  ).catch(function(){});
+                } catch(e){}
+              }
+            });
+          }
+
+          res.writeHead(200); res.end(JSON.stringify({ confident: confident, synopsis: synopsis }));
+        });
+      });
+      apiReq.on('error', function(e){ res.writeHead(200); res.end(JSON.stringify({ confident: false, error: e.message })); });
+      apiReq.setTimeout(30000, function(){ apiReq.destroy(); res.writeHead(200); res.end(JSON.stringify({ confident: false, error: 'Timeout' })); });
+      apiReq.write(postData); apiReq.end();
     });
     return;
   }
