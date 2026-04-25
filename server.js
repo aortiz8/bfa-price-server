@@ -3,6 +3,64 @@ var http = require('http');
 var url = require('url');
 var crypto = require('crypto');
 
+// ────────────────────────────────────────────────────────
+// API CALL TRACKER
+// ────────────────────────────────────────────────────────
+// Wraps https.request to count outbound calls to eBay, Amazon SP-API, and
+// Anthropic. Stores timestamps in a rolling buffer in memory (no DB writes,
+// no perf cost). The /my/api-usage endpoint reads buffer for the temperature
+// gauges on the Activity tab.
+//
+// Buffer size: 50,000 events → at peak usage (~1k calls/hr) holds ~50 hours.
+// Gets trimmed every 1000 inserts so it doesn't grow unbounded.
+// ────────────────────────────────────────────────────────
+var apiCallLog = [];        // each: { ts, provider, op }
+var apiCallInsertCount = 0;
+function logApiCall(provider, op){
+  apiCallLog.push({ ts: Date.now(), provider: provider, op: op || '' });
+  apiCallInsertCount++;
+  // Trim old entries every 1000 inserts (keep last 24 hours + buffer)
+  if(apiCallInsertCount >= 1000){
+    apiCallInsertCount = 0;
+    var cutoff = Date.now() - 26 * 60 * 60 * 1000;
+    var firstKeep = 0;
+    while(firstKeep < apiCallLog.length && apiCallLog[firstKeep].ts < cutoff){ firstKeep++; }
+    if(firstKeep > 0) apiCallLog.splice(0, firstKeep);
+    if(apiCallLog.length > 50000){ apiCallLog.splice(0, apiCallLog.length - 50000); }
+  }
+}
+// Monkey-patch https.request so every outbound call is counted automatically.
+// We classify by hostname; eBay calls additionally read X-EBAY-API-CALL-NAME
+// from the headers so we can break down GetOrders vs GetItem vs etc.
+var _origHttpsRequest = https.request;
+https.request = function(options, cb){
+  try {
+    var host = '';
+    var headers = {};
+    if(typeof options === 'string'){
+      var p = url.parse(options);
+      host = p.hostname || '';
+    } else if(options && typeof options === 'object'){
+      host = options.hostname || options.host || '';
+      headers = options.headers || {};
+    }
+    if(host === 'api.ebay.com'){
+      var ebayOp = headers['X-EBAY-API-CALL-NAME'] || headers['x-ebay-api-call-name'] || 'unknown';
+      logApiCall('ebay', ebayOp);
+    } else if(host === 'sellingpartnerapi-na.amazon.com' || host === 'sellingpartnerapi-eu.amazon.com' || host === 'sellingpartnerapi-fe.amazon.com'){
+      // Path looks like /catalog/2022-04-01/items/{asin} or /orders/v0/orders
+      var amzPath = (typeof options === 'object' && options.path) ? options.path : '';
+      var amzOp = (amzPath.match(/^\/([a-z]+)\//) || [null, 'unknown'])[1];
+      logApiCall('amazon', amzOp);
+    } else if(host === 'api.anthropic.com'){
+      logApiCall('anthropic', 'messages');
+    }
+  } catch(e){
+    // Never let tracking break a real request
+  }
+  return _origHttpsRequest.apply(this, arguments);
+};
+
 var PORT = process.env.PORT || 3000;
 
 // eBay credentials (yours - default)
@@ -7683,6 +7741,56 @@ var server = http.createServer(function(req, res) {
     });
     fReq.on('error', function(e){ res.writeHead(502); res.end('Fetch failed: ' + e.message); });
     fReq.setTimeout(15000, function(){ fReq.destroy(); res.writeHead(504); res.end('Timeout'); });
+    return;
+  }
+
+  // ── API usage tracker (Activity tab "API health" gauges) ──
+  // Reads the in-memory call log and returns totals/breakdowns. Limits are
+  // documented defaults — Anthropic doesn't have a hard ceiling so we surface
+  // hourly volume as a "use awareness" gauge rather than a quota.
+  if (pathname === '/my/api-usage' && req.method === 'GET') {
+    var auCode = (parsed.query.code || '').toUpperCase();
+    var auSess = getRequestSession(req, parsed);
+    if(!auSess || auSess.role !== 'admin' || auSess.subscriberCode !== auCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var now = Date.now();
+    var minuteCutoff = now - 60 * 1000;
+    var hourCutoff = now - 60 * 60 * 1000;
+    var dayCutoff = now - 24 * 60 * 60 * 1000;
+
+    // Tallies
+    var byProvider = { ebay: { minute:0, hour:0, day:0, ops:{} }, amazon: { minute:0, hour:0, day:0, ops:{} }, anthropic: { minute:0, hour:0, day:0, ops:{} } };
+    // Per-bucket history for sparklines: 24 buckets of 1 hour each
+    var spark = { ebay: new Array(24).fill(0), amazon: new Array(24).fill(0), anthropic: new Array(24).fill(0) };
+
+    for(var i = 0; i < apiCallLog.length; i++){
+      var e = apiCallLog[i];
+      if(!byProvider[e.provider]) continue;
+      if(e.ts >= minuteCutoff) byProvider[e.provider].minute++;
+      if(e.ts >= hourCutoff)   byProvider[e.provider].hour++;
+      if(e.ts >= dayCutoff){
+        byProvider[e.provider].day++;
+        byProvider[e.provider].ops[e.op] = (byProvider[e.provider].ops[e.op] || 0) + 1;
+        var bucket = Math.floor((now - e.ts) / (60 * 60 * 1000));
+        if(bucket >= 0 && bucket < 24) spark[e.provider][23 - bucket]++;
+      }
+    }
+
+    // Limits (documented defaults; subject to your account tier)
+    // eBay Trading API: 5,000 calls/day per app
+    // Amazon SP-API: rates are per-operation, but we use ~10 burst/sec as the
+    //   alarm threshold for "are we hammering it" — combined view across ops
+    // Anthropic: no hard rate limit, surface volume + estimated spend
+    res.writeHead(200);
+    res.end(JSON.stringify({
+      now: now,
+      providers: {
+        ebay:      { used: byProvider.ebay.day,      limit: 5000, period: 'day',    minute: byProvider.ebay.minute,      hour: byProvider.ebay.hour,      ops: byProvider.ebay.ops,      spark: spark.ebay },
+        amazon:    { used: byProvider.amazon.minute, limit: 600,  period: 'minute', minute: byProvider.amazon.minute,    hour: byProvider.amazon.hour,    ops: byProvider.amazon.ops,    spark: spark.amazon },
+        anthropic: { used: byProvider.anthropic.hour, limit: null, period: 'hour',  minute: byProvider.anthropic.minute, hour: byProvider.anthropic.hour, ops: byProvider.anthropic.ops, spark: spark.anthropic }
+      }
+    }));
     return;
   }
 
