@@ -7645,6 +7645,47 @@ var server = http.createServer(function(req, res) {
     return;
   }
 
+  // ── Social Posts: Image proxy ──
+  // Used by the browser to load eBay/Amazon book covers into a <canvas> for
+  // styling. eBay's image hosts don't send permissive CORS headers, so the
+  // browser can display the image but can't read its pixels. This endpoint
+  // fetches the image server-side and re-serves it with Access-Control-Allow-Origin: *.
+  // Allowed source domains are whitelisted to prevent the server from being
+  // used as an open image proxy.
+  if (pathname === '/my/social/proxy-image' && req.method === 'GET') {
+    var pCode = (parsed.query.code || '').toUpperCase();
+    var pSess = getRequestSession(req, parsed);
+    if(!pSess || pSess.role !== 'admin' || pSess.subscriberCode !== pCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    var srcUrl = (parsed.query.url || '').trim();
+    if(!srcUrl){ res.writeHead(400); res.end('Missing url'); return; }
+    var allowedHosts = [
+      'i.ebayimg.com', 'thumbs.ebaystatic.com', 'pics.ebaystatic.com',
+      'm.media-amazon.com', 'images-na.ssl-images-amazon.com', 'images-amazon.com'
+    ];
+    var parsedSrc;
+    try { parsedSrc = url.parse(srcUrl); } catch(e){ res.writeHead(400); res.end('Bad url'); return; }
+    if(!parsedSrc.hostname || allowedHosts.indexOf(parsedSrc.hostname) === -1){
+      res.writeHead(400); res.end('Domain not allowed'); return;
+    }
+    var fetcher = (parsedSrc.protocol === 'http:') ? require('http') : https;
+    var fReq = fetcher.get(srcUrl, function(fRes){
+      if(fRes.statusCode !== 200){
+        res.writeHead(fRes.statusCode); res.end('Upstream ' + fRes.statusCode); return;
+      }
+      res.writeHead(200, {
+        'Content-Type': fRes.headers['content-type'] || 'image/jpeg',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'public, max-age=86400'
+      });
+      fRes.pipe(res);
+    });
+    fReq.on('error', function(e){ res.writeHead(502); res.end('Fetch failed: ' + e.message); });
+    fReq.setTimeout(15000, function(){ fReq.destroy(); res.writeHead(504); res.end('Timeout'); });
+    return;
+  }
+
   if (pathname === '/my/warehouse-listings/delete' && req.method === 'POST') {
     parseBody(req, function(err, data){
       var wCode = (data.code || '').toUpperCase();
