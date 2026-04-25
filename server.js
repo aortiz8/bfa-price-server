@@ -2530,6 +2530,17 @@ function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
       var data = '';
       r.on('data', function(c){ data += c; });
       r.on('end', function(){
+        // Debug: log overall response shape so we can see WHY a SKU isn't found
+        var ackMatchDbg = data.match(/<Ack>([^<]+)<\/Ack>/);
+        var skusInResponse = [];
+        var reAllSku = /<SKU>([^<]+)<\/SKU>/g;
+        var allSkuM;
+        while((allSkuM = reAllSku.exec(data)) !== null){ skusInResponse.push(allSkuM[1]); }
+        console.log('[findEbaySoldBookBySku] target=' + targetSku
+          + ' ack=' + (ackMatchDbg ? ackMatchDbg[1] : 'none')
+          + ' skusFound=' + skusInResponse.length
+          + ' first10=' + skusInResponse.slice(0, 10).join(','));
+
         // Walk Orders → Transactions, looking for one with matching SKU.
         var targetUpper = targetSku.toUpperCase();
         var reOrder = /<Order>([\s\S]*?)<\/Order>/g;
@@ -2601,6 +2612,7 @@ function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
           }
         }
         // No matching SKU found in last N days
+        console.log('[findEbaySoldBookBySku] no match for ' + targetSku + ' in ' + skusInResponse.length + ' SKUs returned');
         cb(null, null);
       });
     });
