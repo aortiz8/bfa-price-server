@@ -2647,6 +2647,214 @@ function findEbaySoldBookBySku(subscriberCode, targetSku, daysBack, cb){
 }
 
 
+// Fetch an eBay listing's full details — description, pictures, item specifics —
+// for a given ItemID. Used by the Social Posts feature to enrich SKU lookups
+// that resolved via sold-orders search but lack description/pictures.
+// Returns { description, pictureUrls: [...], specifics: {...} } or null on error.
+function fetchEbayItemDetails(subscriberCode, itemId, cb){
+  if(!itemId){ cb('itemId required', null); return; }
+  getSubscriber(subscriberCode, function(err, sub){
+    if(!sub){ cb('Subscriber not found', null); return; }
+    var token = sub.ebayOAuthToken || sub.ebayUserToken || USER_TOKEN;
+    if(!token){ cb('No eBay token', null); return; }
+    var xml = '<?xml version="1.0" encoding="utf-8"?>'
+      + '<GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents">'
+      +   '<RequesterCredentials><eBayAuthToken>' + token + '</eBayAuthToken></RequesterCredentials>'
+      +   '<ItemID>' + itemId + '</ItemID>'
+      +   '<DetailLevel>ReturnAll</DetailLevel>'
+      +   '<IncludeItemSpecifics>true</IncludeItemSpecifics>'
+      + '</GetItemRequest>';
+    var opts = {
+      hostname: 'api.ebay.com', path: '/ws/api.dll', method: 'POST',
+      headers: {
+        'X-EBAY-API-CALL-NAME': 'GetItem',
+        'X-EBAY-API-SITEID': '0',
+        'X-EBAY-API-COMPATIBILITY-LEVEL': '1193',
+        'X-EBAY-API-IAF-TOKEN': token,
+        'Content-Type': 'text/xml',
+        'Content-Length': Buffer.byteLength(xml)
+      }
+    };
+    var eReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        var ackM = data.match(/<Ack>([^<]+)<\/Ack>/);
+        if(!ackM || (ackM[1] !== 'Success' && ackM[1] !== 'Warning')){
+          var errM = data.match(/<ShortMessage>([^<]+)<\/ShortMessage>/);
+          console.log('[fetchEbayItemDetails] failed for ' + itemId + ': ' + (errM ? errM[1] : 'unknown'));
+          cb('GetItem failed: ' + (errM ? errM[1] : 'unknown'), null);
+          return;
+        }
+        // Description — wrapped in CDATA, may contain HTML
+        var description = '';
+        var descCdataM = data.match(/<Description><!\[CDATA\[([\s\S]*?)\]\]><\/Description>/);
+        if(descCdataM){
+          description = descCdataM[1];
+        } else {
+          var descPlainM = data.match(/<Description>([\s\S]*?)<\/Description>/);
+          if(descPlainM) description = descPlainM[1];
+        }
+
+        // All picture URLs from PictureDetails. We get the order eBay returns —
+        // first is usually the gallery image (cover).
+        var pictureUrls = [];
+        var picDetailsM = data.match(/<PictureDetails>([\s\S]*?)<\/PictureDetails>/);
+        if(picDetailsM){
+          var rePicUrl = /<PictureURL>([^<]+)<\/PictureURL>/g;
+          var pm;
+          while((pm = rePicUrl.exec(picDetailsM[1])) !== null){
+            pictureUrls.push(pm[1]);
+          }
+        }
+
+        // Item specifics — name/value pairs. Used as extra context for synopsis.
+        var specifics = {};
+        var specBlockM = data.match(/<ItemSpecifics>([\s\S]*?)<\/ItemSpecifics>/);
+        if(specBlockM){
+          var reNvl = /<NameValueList>([\s\S]*?)<\/NameValueList>/g;
+          var nvl;
+          while((nvl = reNvl.exec(specBlockM[1])) !== null){
+            var nameM = nvl[1].match(/<Name>([^<]+)<\/Name>/);
+            var valM = nvl[1].match(/<Value>([^<]+)<\/Value>/);
+            if(nameM && valM){ specifics[nameM[1].trim().toLowerCase()] = valM[1].trim(); }
+          }
+        }
+
+        console.log('[fetchEbayItemDetails] itemId=' + itemId
+          + ' descLen=' + description.length
+          + ' pictures=' + pictureUrls.length
+          + ' specifics=' + Object.keys(specifics).length);
+        cb(null, { description: description, pictureUrls: pictureUrls, specifics: specifics });
+      });
+    });
+    eReq.on('error', function(e){ cb(e.message, null); });
+    eReq.setTimeout(20000, function(){ eReq.destroy(); cb('Timeout', null); });
+    eReq.write(xml); eReq.end();
+  });
+}
+
+// Strip HTML tags + decode common entities. Used to turn eBay's HTML descriptions
+// into plain text we can feed to Claude or display.
+function stripHtml(html){
+  if(!html) return '';
+  var s = String(html);
+  // Drop script/style blocks entirely
+  s = s.replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ');
+  // Replace block-level tags with newlines so paragraphs separate
+  s = s.replace(/<\/?(p|div|br|li|tr|h[1-6])[^>]*>/gi, '\n');
+  // Drop remaining tags
+  s = s.replace(/<[^>]+>/g, ' ');
+  // Decode common HTML entities
+  s = s.replace(/&nbsp;/g, ' ')
+       .replace(/&amp;/g, '&')
+       .replace(/&lt;/g, '<')
+       .replace(/&gt;/g, '>')
+       .replace(/&quot;/g, '"')
+       .replace(/&#39;/g, "'")
+       .replace(/&rsquo;/g, "'")
+       .replace(/&lsquo;/g, "'")
+       .replace(/&ldquo;/g, '"')
+       .replace(/&rdquo;/g, '"')
+       .replace(/&mdash;/g, '—')
+       .replace(/&ndash;/g, '–');
+  // Collapse whitespace
+  s = s.replace(/[ \t]+/g, ' ').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n');
+  return s.trim();
+}
+
+// Summarize an eBay description into a 2-3 sentence Instagram-friendly caption
+// using Claude. Unlike the knowledge-based synopsis endpoint, this only asks
+// Claude to summarize text it's been given, so it works for niche/obscure books
+// Claude wouldn't recognize.
+// Generate a 2-3 sentence Instagram synopsis for a book pulled from an eBay
+// listing. Handles two scenarios:
+//   1. Seller wrote a real description → summarize that
+//   2. No description (most BFA listings) → use Claude's knowledge of the book
+//
+// In BOTH cases, the eBay listing title is treated as messy: it often contains
+// seller-marketing words (SIGNED, AUTOGRAPHED, FIRST EDITION, RARE, 16X, etc.)
+// jumbled with the real title. We instruct Claude to identify the actual book
+// inside the listing title before writing the synopsis. If Claude isn't sure
+// which book it is, it returns an empty synopsis rather than inventing.
+function summarizeEbayDescription(description, title, cb){
+  if(!ANTHROPIC_KEY){ cb('No Anthropic key', ''); return; }
+  var plain = stripHtml(description || '').slice(0, 4000);
+  var hasDescription = plain.length >= 80;
+
+  var userPrompt;
+  if(hasDescription){
+    userPrompt =
+      'Below is the eBay listing for a used book we are reselling. The TITLE is the eBay listing title — it may include seller-marketing words like SIGNED, AUTOGRAPHED, FIRST EDITION, RARE, NEW, numbers (e.g. "16X"), or trailing additions like "+ OTHERS". The actual book title is buried in there.\n\n'
+      + 'Step 1: identify the real book title within the listing title.\n'
+      + 'Step 2: write a 2 to 3 sentence Instagram caption summarizing the description below, mentioning what the book is actually about.\n\n'
+      + 'LISTING TITLE: ' + (title || 'Untitled') + '\n\n'
+      + 'SELLER DESCRIPTION:\n' + plain + '\n\n'
+      + 'RULES:\n'
+      + '- 2 to 3 sentences. Casual, warm, English only. No exclamation points. No "you will love this".\n'
+      + '- Use facts from the description and what you know about this real book. Do not invent details.\n'
+      + '- Skip shipping/return/payment boilerplate.\n'
+      + '- If you cannot confidently identify what book this is, set synopsis to empty string.\n'
+      + '- Output strict JSON. No prose, no code fences.\n\n'
+      + 'Output schema: { "synopsis": "..." }';
+  } else {
+    userPrompt =
+      'Below is an eBay listing title for a used book we are reselling. The title is messy: it often contains seller-marketing words like SIGNED, AUTOGRAPHED, FIRST EDITION, RARE, NEW, numbers (e.g. "16X"), or trailing additions like "+ OTHERS" mixed in with the real book title.\n\n'
+      + 'Step 1: identify the actual book title within the listing title.\n'
+      + 'Step 2: if you confidently know that book, write a 2 to 3 sentence Instagram caption about what the book is about.\n\n'
+      + 'LISTING TITLE: ' + (title || 'Untitled') + '\n\n'
+      + 'RULES:\n'
+      + '- 2 to 3 sentences. Casual, warm, English only. No exclamation points. No "you will love this".\n'
+      + '- Use only what you genuinely know about the real book. Do not invent plot details.\n'
+      + '- If after stripping the marketing words you still cannot confidently identify the book, OR you do not know enough about it to write a synopsis, set synopsis to empty string.\n'
+      + '- Output strict JSON. No prose, no code fences.\n\n'
+      + 'Output schema: { "synopsis": "..." }';
+  }
+
+  var payload = {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: userPrompt }]
+  };
+  var postData = JSON.stringify(payload);
+  var opts = {
+    hostname: 'api.anthropic.com', path: '/v1/messages', method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': ANTHROPIC_KEY,
+      'anthropic-version': '2023-06-01',
+      'Content-Length': Buffer.byteLength(postData)
+    }
+  };
+  var apiReq = https.request(opts, function(apiRes){
+    var raw = '';
+    apiRes.on('data', function(c){ raw += c; });
+    apiRes.on('end', function(){
+      try {
+        var json = JSON.parse(raw);
+        var text = (json.content && json.content[0] && json.content[0].text) || '';
+        text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+        var parsed2 = JSON.parse(text);
+        if(parsed2 && typeof parsed2.synopsis === 'string' && parsed2.synopsis.trim()){
+          console.log('[summarizeEbayDescription] mode=' + (hasDescription ? 'desc' : 'knowledge')
+            + ' titleLen=' + (title ? title.length : 0)
+            + ' synopsisLen=' + parsed2.synopsis.length);
+          cb(null, parsed2.synopsis.trim());
+          return;
+        }
+        console.log('[summarizeEbayDescription] empty synopsis — Claude couldn\'t identify book in: '
+          + (title ? title.slice(0, 80) : 'no title'));
+      } catch(e){
+        console.log('[summarizeEbayDescription] parse error: ' + e.message);
+      }
+      cb(null, '');
+    });
+  });
+  apiReq.on('error', function(e){ cb(e.message, ''); });
+  apiReq.setTimeout(30000, function(){ apiReq.destroy(); cb('Timeout', ''); });
+  apiReq.write(postData); apiReq.end();
+}
+
 // End an eBay listing by ItemID via Trading API EndItem
 function endEbayListing(subscriberCode, itemId, cb){
   getSubscriber(subscriberCode, function(err, sub){
@@ -7296,7 +7504,41 @@ var server = http.createServer(function(req, res) {
             res.writeHead(200); res.end(JSON.stringify({ found: false, status: 'notfound' }));
             return;
           }
-          res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
+          // Enrich with GetItem if we have an ItemID — gets us pictures + description.
+          if(!ebayBook.ebayItemId){
+            res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
+            return;
+          }
+          fetchEbayItemDetails(bsCode, ebayBook.ebayItemId, function(detErr, details){
+            if(detErr || !details){
+              // GetItem failed — return what we have
+              res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
+              return;
+            }
+            // Use the first PictureURL as the cover (overrides any cover we
+            // might have parsed from the orders response, which is usually empty).
+            if(details.pictureUrls && details.pictureUrls.length){
+              ebayBook.coverUrl = details.pictureUrls[0];
+              ebayBook.allPictures = details.pictureUrls;
+            }
+            // Backfill author/year/format/isbn from the listing's item specifics
+            // if we didn't already pull them from the order.
+            var sp = details.specifics || {};
+            if(!ebayBook.author && sp['author']) ebayBook.author = sp['author'];
+            if(!ebayBook.year && (sp['publication year'] || sp['year'])) ebayBook.year = sp['publication year'] || sp['year'];
+            if(!ebayBook.format && (sp['format'] || sp['binding'])) ebayBook.format = sp['format'] || sp['binding'];
+            if(!ebayBook.isbn && (sp['isbn'] || sp['isbn-13'] || sp['isbn-10'])) ebayBook.isbn = sp['isbn'] || sp['isbn-13'] || sp['isbn-10'];
+            if(!ebayBook.publisher && sp['publisher']) ebayBook.publisher = sp['publisher'];
+
+            // Synopsis: ask Claude. summarizeEbayDescription handles both
+            // cases — uses the description if we have one, otherwise asks
+            // Claude to identify the real book inside the messy listing
+            // title and write from its own knowledge.
+            summarizeEbayDescription(details.description || '', ebayBook.title, function(sumErr, synopsis){
+              if(synopsis) ebayBook.synopsis = synopsis;
+              res.writeHead(200); res.end(JSON.stringify({ found: true, status: 'sold', book: ebayBook, source: 'ebay' }));
+            });
+          });
         });
       })
       .catch(function(e){
