@@ -1593,6 +1593,328 @@ function applyGuards(currentPrice, targetPrice, config, isFirstPass, priceChange
 
 // Fetch competing offers from Amazon SP-API Product Pricing for a given ASIN
 // Returns [{price, condition, fulfillment, sellerId}]
+// ────────────────────────────────────────────────────────
+// SORTER (scan-and-route) helpers
+// ────────────────────────────────────────────────────────
+// Scanner workflow: an employee scans a barcode at /scan, server looks up
+// the book on Amazon, runs admin-defined rules, returns a destination.
+//
+// Decision flow per scan:
+//   1. Look up ASIN from ISBN if needed → catalog + Used offers + New offers
+//   2. Run MF rules (rank ladder + profit) using each rule's targetposition
+//   3. If no MF match, run BOOKMOBILE rules
+//   4. If still no match, run BUYBACK rules
+//   5. Otherwise REJECT
+//
+// Cache lookups per ASIN for 24h so a popular textbook scanned 50x/day = 1 call.
+// ────────────────────────────────────────────────────────
+
+var sorterAmazonCache = {};       // asin/isbn → { ts, book }
+var SORTER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// Fetch all Used offers + all New offers for an ASIN in parallel.
+// Returns { offers: [...], used: [...], newOffers: [...], errors: [...] },
+// each offer tagged with { price, condition, conditionGroup, fulfillment, sellerId }.
+function fetchAmazonOffersByCondition(accessToken, marketplaceId, asin, cb){
+  if(!asin){ cb('No ASIN', null); return; }
+  var pending = 2;
+  var result = { used: [], newOffers: [], errors: [] };
+  function fetchCondition(condition, key){
+    var path = '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers'
+             + '?MarketplaceId=' + marketplaceId
+             + '&ItemCondition=' + condition;
+    var opts = {
+      hostname: 'sellingpartnerapi-na.amazon.com',
+      path: path, method: 'GET',
+      headers: { 'x-amz-access-token': accessToken }
+    };
+    var aReq = https.request(opts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        try {
+          var json = JSON.parse(data);
+          if(json.errors && json.errors[0]){
+            result.errors.push(condition + ': ' + (json.errors[0].message || json.errors[0].code));
+          } else {
+            var payload = (json.payload && json.payload.Offers) || [];
+            result[key] = payload.map(function(o){
+              var price = 0;
+              if(o.ListingPrice && typeof o.ListingPrice.Amount === 'number') price = o.ListingPrice.Amount;
+              var shipping = (o.Shipping && typeof o.Shipping.Amount === 'number') ? o.Shipping.Amount : 0;
+              return {
+                price: +(price + shipping).toFixed(2),
+                condition: o.SubCondition ? condition + '-' + o.SubCondition : condition,
+                conditionGroup: condition,
+                fulfillment: o.IsFulfilledByAmazon ? 'FBA' : 'FBM',
+                sellerId: o.SellerId || ''
+              };
+            });
+          }
+        } catch(e){ result.errors.push(condition + ': parse ' + e.message); }
+        pending--;
+        if(pending === 0){
+          cb(null, { offers: result.used.concat(result.newOffers), used: result.used, newOffers: result.newOffers, errors: result.errors });
+        }
+      });
+    });
+    aReq.on('error', function(e){
+      result.errors.push(condition + ': ' + e.message);
+      pending--;
+      if(pending === 0){
+        cb(null, { offers: result.used.concat(result.newOffers), used: result.used, newOffers: result.newOffers, errors: result.errors });
+      }
+    });
+    aReq.setTimeout(15000, function(){ aReq.destroy(); });
+    aReq.end();
+  }
+  fetchCondition('Used', 'used');
+  fetchCondition('New', 'newOffers');
+}
+
+// Look up a barcode (ISBN-13/ISBN-10/ASIN) on Amazon → catalog + offers + rank + weight.
+function fetchBookForSorter(identifier, cb){
+  if(!identifier){ cb('No identifier', null); return; }
+  var ident = identifier.replace(/[^0-9X]/gi, '');
+  var cached = sorterAmazonCache[ident];
+  if(cached && (Date.now() - cached.ts) < SORTER_CACHE_TTL_MS){
+    cb(null, cached.book);
+    return;
+  }
+  getAmazonAccessToken(function(tokErr, accessToken){
+    if(tokErr){ cb('Amazon auth failed: ' + tokErr, null); return; }
+    var identifierType = ident.length === 13 ? 'EAN' : (ident.length === 10 ? 'ISBN' : 'ASIN');
+    var catPath = '/catalog/2022-04-01/items?identifiers=' + ident
+                + '&identifiersType=' + identifierType
+                + '&marketplaceIds=' + AMAZON_MARKETPLACE_ID
+                + '&includedData=attributes,images,summaries,dimensions,salesRanks';
+    var catOpts = {
+      hostname: 'sellingpartnerapi-na.amazon.com',
+      path: catPath, method: 'GET',
+      headers: { 'x-amz-access-token': accessToken, 'Accept': 'application/json' }
+    };
+    var catReq = https.request(catOpts, function(r){
+      var data = '';
+      r.on('data', function(c){ data += c; });
+      r.on('end', function(){
+        var book;
+        try {
+          var json = JSON.parse(data);
+          var items = (json && json.items) || [];
+          if(!items.length){ cb('Not found in Amazon catalog', null); return; }
+          var item = items[0];
+          var attrs = item.attributes || {};
+          var summaries = (item.summaries && item.summaries[0]) || {};
+          var dims = item.dimensions || [];
+
+          var title = (attrs.item_name && attrs.item_name[0] && attrs.item_name[0].value) || summaries.itemName || '';
+          var author = '';
+          if(attrs.contributor){ attrs.contributor.forEach(function(c){ if(!author && c.value) author = c.value; }); }
+          if(!author && summaries.author) author = summaries.author;
+          var format = (attrs.binding && attrs.binding[0] && attrs.binding[0].value) || 'Paperback';
+          format = format.charAt(0).toUpperCase() + format.slice(1).toLowerCase();
+          var pubDate = (attrs.publication_date && attrs.publication_date[0] && attrs.publication_date[0].value) || '';
+          var year = pubDate ? pubDate.substring(0,4) : '';
+          var asin = item.asin || '';
+
+          // Sales rank — Books top-level
+          var salesRank = null;
+          var srArr = item.salesRanks || [];
+          if(srArr.length){
+            var dg = (srArr[0] && srArr[0].displayGroupRanks) || [];
+            if(dg.length && dg[0].rank) salesRank = dg[0].rank;
+          }
+
+          // Weight extraction with unit conversion
+          var weightLb = null;
+          function tryWeight(obj){
+            if(!obj) return null;
+            var v = parseFloat(obj.value || 0);
+            var u = (obj.unit || '').toLowerCase();
+            if(v <= 0) return null;
+            if(u.indexOf('pound') !== -1 || u === 'lb' || u === 'lbs') return v;
+            if(u.indexOf('ounc') !== -1 || u === 'oz')  return v / 16;
+            if(u.indexOf('kilo') !== -1 || u === 'kg')  return v * 2.2046;
+            if(u.indexOf('gram') !== -1 || u === 'g')   return v * 0.0022046;
+            return null;
+          }
+          if(attrs.item_weight && attrs.item_weight[0]) weightLb = tryWeight(attrs.item_weight[0]);
+          if(!weightLb){
+            dims.forEach(function(dg){ var d = dg.dimensions || {}; if(d.weight && !weightLb) weightLb = tryWeight(d.weight); });
+          }
+          if(!weightLb || weightLb <= 0) weightLb = 1.0;
+
+          var coverUrl = '';
+          var bestSize = 0;
+          (item.images || []).forEach(function(g){
+            (g.images || []).forEach(function(img){
+              if(img.variant === 'MAIN' && (img.height || 0) > bestSize){ bestSize = img.height || 0; coverUrl = img.link || ''; }
+            });
+          });
+
+          book = {
+            asin: asin, isbn: ident, title: title, author: author,
+            format: format, year: year, salesRank: salesRank,
+            weightLb: +weightLb.toFixed(2), coverUrl: coverUrl
+          };
+        } catch(e){ cb('Parse error: ' + e.message, null); return; }
+
+        if(!book.asin){ cb(null, book); return; }
+        fetchAmazonOffersByCondition(accessToken, AMAZON_MARKETPLACE_ID, book.asin, function(offErr, offData){
+          if(offData){ book.offers = offData.offers; book.used = offData.used; book.newOffers = offData.newOffers; book.offerErrors = offData.errors; }
+          else { book.offers = []; book.used = []; book.newOffers = []; }
+          sorterAmazonCache[book.asin] = { ts: Date.now(), book: book };
+          sorterAmazonCache[ident] = { ts: Date.now(), book: book };
+          cb(null, book);
+        });
+      });
+    });
+    catReq.on('error', function(e){ cb(e.message, null); });
+    catReq.setTimeout(15000, function(){ catReq.destroy(); cb('Timeout', null); });
+    catReq.end();
+  });
+}
+
+// Get the price at a target position from a list of offers (1-indexed, cheapest first).
+function priceAtPosition(offers, position){
+  if(!offers || !offers.length) return null;
+  var sorted = offers.slice().sort(function(a,b){ return a.price - b.price; });
+  var idx = Math.max(0, Math.min(position - 1, sorted.length - 1));
+  return sorted[idx].price;
+}
+
+// Pick shipping cost from the user-defined tier table for a given weight.
+function shippingForWeight(weightLb, tiers){
+  if(!tiers || !tiers.length) return 0;
+  var sorted = tiers.slice().sort(function(a,b){ return (+a.maxLb||0) - (+b.maxLb||0); });
+  for(var i = 0; i < sorted.length; i++){
+    if(weightLb <= (+sorted[i].maxLb || 999999)) return +sorted[i].amount || 0;
+  }
+  return +(sorted[sorted.length - 1].amount) || 0;
+}
+
+// Calculate Amazon MF profit for a given listing price.
+function calcMfProfit(salePrice, weightLb, fees){
+  if(salePrice == null || salePrice <= 0) return null;
+  fees = fees || {};
+  var cost   = +(fees.costPerBook  || 0);
+  var pick   = +(fees.pickAndPack  || 0);
+  var neato  = +((fees.neatoscanPct != null ? fees.neatoscanPct : 0));
+  var refPct = +((fees.referralPct != null ? fees.referralPct : 15));
+  var close  = +(fees.closingFee   || 0);
+  var ship   = shippingForWeight(weightLb || 1, fees.shippingTiers || []);
+
+  var referral = salePrice * (refPct / 100);
+  var neatoFee = salePrice * (neato / 100);
+  var profit = salePrice - referral - close - ship - pick - neatoFee - cost;
+
+  return {
+    salePrice: +salePrice.toFixed(2),
+    weightLb: +(+weightLb || 1).toFixed(2),
+    referral: +referral.toFixed(2),
+    closingFee: +close.toFixed(2),
+    shipping: +ship.toFixed(2),
+    pickAndPack: +pick.toFixed(2),
+    neatoscan: +neatoFee.toFixed(2),
+    costPerBook: +cost.toFixed(2),
+    profit: +profit.toFixed(2)
+  };
+}
+
+// Apply the global new-cap: if used target ≥ new × (1 - X%), drop our used to that.
+function applyUsedVsNewCap(usedTarget, mfNewOffers, capPct){
+  var info = { effectivePrice: usedTarget, capped: false, capPct: capPct, ourUsedTarget: usedTarget, cheapestNewPrice: null };
+  if(!capPct || capPct <= 0) return info;
+  if(usedTarget == null) return info;
+  var mfNew = (mfNewOffers || []).filter(function(o){ return o.fulfillment === 'FBM'; });
+  if(!mfNew.length) return info;
+  var cheapestNew = priceAtPosition(mfNew, 1);
+  info.cheapestNewPrice = cheapestNew;
+  if(cheapestNew == null) return info;
+  var maxAllowed = +(cheapestNew * (1 - capPct/100)).toFixed(2);
+  if(usedTarget >= maxAllowed){ info.effectivePrice = maxAllowed; info.capped = true; }
+  return info;
+}
+
+// Run the rules engine. Returns { destination, ruleId, ruleName, reason, math, color, capInfo }.
+function runSorter(book, rulesDoc, fees){
+  rulesDoc = rulesDoc || {};
+  fees = fees || {};
+  var capPct = +(fees.usedVsNewCapPct || 0);
+  var usedMfOffers = (book.used || []).filter(function(o){ return o.fulfillment === 'FBM'; });
+  var rank = book.salesRank;
+  var weight = book.weightLb || 1;
+  var colors = rulesDoc.colors || {};
+
+  // 1. MF rules
+  var mfRules = (rulesDoc.mf || []).filter(function(r){ return r.enabled !== false; });
+  for(var i = 0; i < mfRules.length; i++){
+    var r = mfRules[i];
+    var rankOk = (r.salesRank_max == null || r.salesRank_max === '') ? true : (rank != null && rank <= +r.salesRank_max);
+    if(!rankOk) continue;
+    var pos = +r.targetposition || 1;
+    var usedTarget = priceAtPosition(usedMfOffers, pos);
+    if(usedTarget == null) continue;
+    var capInfo = applyUsedVsNewCap(usedTarget, book.newOffers || [], capPct);
+    var math = calcMfProfit(capInfo.effectivePrice, weight, fees);
+    if(!math) continue;
+    if((+r.profit_min || 0) > math.profit) continue;
+    return {
+      destination: 'AMAZON-MF',
+      ruleId: r.id || ('mf-' + i),
+      ruleName: r.name || ('MF rule ' + (i + 1)),
+      reason: 'Rank ' + (rank ? rank.toLocaleString() : 'n/a') + ' ≤ ' + (+r.salesRank_max).toLocaleString()
+            + ', profit $' + math.profit.toFixed(2) + ' ≥ $' + (+r.profit_min).toFixed(2),
+      color: colors['AMAZON-MF'] || '#22a06b',
+      math: math, capInfo: capInfo, usedTargetPosition: pos
+    };
+  }
+
+  // 2. Bookmobile
+  var bmRules = (rulesDoc.bookmobile || []).filter(function(r){ return r.enabled !== false; });
+  for(var j = 0; j < bmRules.length; j++){
+    var br = bmRules[j];
+    var brOk = (br.salesRank_max == null || br.salesRank_max === '') ? true : (rank != null && rank <= +br.salesRank_max);
+    if(brOk){
+      return {
+        destination: 'BOOKMOBILE',
+        ruleId: br.id || ('bm-' + j),
+        ruleName: br.name || ('Bookmobile rule ' + (j + 1)),
+        reason: 'Rank ' + (rank ? rank.toLocaleString() : 'n/a') + (br.salesRank_max ? (' ≤ ' + (+br.salesRank_max).toLocaleString()) : ''),
+        color: colors['BOOKMOBILE'] || '#3b82f6',
+        math: null
+      };
+    }
+  }
+
+  // 3. Buyback (requires ASIN AND rank under threshold)
+  var bbRules = (rulesDoc.buyback || []).filter(function(r){ return r.enabled !== false; });
+  for(var k = 0; k < bbRules.length; k++){
+    var bb = bbRules[k];
+    var bbOk = (bb.salesRank_max == null || bb.salesRank_max === '') ? true : (rank != null && rank <= +bb.salesRank_max);
+    if(bbOk && book.asin){
+      return {
+        destination: 'BUYBACK',
+        ruleId: bb.id || ('bb-' + k),
+        ruleName: bb.name || ('Buyback rule ' + (k + 1)),
+        reason: 'ISBN scans, rank ' + (rank ? rank.toLocaleString() : 'n/a') + (bb.salesRank_max ? (' ≤ ' + (+bb.salesRank_max).toLocaleString()) : ''),
+        color: colors['BUYBACK'] || '#f59e0b',
+        math: null
+      };
+    }
+  }
+
+  // 4. REJECT
+  return {
+    destination: 'REJECT',
+    ruleId: 'default',
+    ruleName: 'No rule matched',
+    reason: rank ? ('Rank ' + rank.toLocaleString() + ' did not qualify for any route') : 'Insufficient data',
+    color: colors['REJECT'] || '#ef4444',
+    math: null
+  };
+}
+
 function fetchAmazonOffers(accessToken, marketplaceId, asin, cb){
   if(!asin) { cb('No ASIN', []); return; }
   var path = '/products/pricing/v0/items/' + encodeURIComponent(asin) + '/offers'
@@ -7791,6 +8113,318 @@ var server = http.createServer(function(req, res) {
         anthropic: { used: byProvider.anthropic.hour, limit: null, period: 'hour',  minute: byProvider.anthropic.minute, hour: byProvider.anthropic.hour, ops: byProvider.anthropic.ops, spark: spark.anthropic }
       }
     }));
+    return;
+  }
+
+  // ────────────────────────────────────────────────────────
+  // SORTER ENDPOINTS
+  // ────────────────────────────────────────────────────────
+  // Stored in MongoDB:
+  //   sorter_rules   — one doc per subscriber: { code, mf:[], bookmobile:[], buyback:[], colors:{} }
+  //   sorter_fees    — one doc per subscriber: { code, costPerBook, pickAndPack, neatoscanPct, referralPct, closingFee, shippingTiers:[], usedVsNewCapPct }
+  //   sorter_scans   — one doc per scan event (history)
+  //   sorter_sessions — one doc per active employee scan session
+
+  // Default rules + fees seed for first-time setup
+  function defaultSorterRules(){
+    return {
+      colors: { 'AMAZON-MF': '#22a06b', 'BOOKMOBILE': '#3b82f6', 'BUYBACK': '#f59e0b', 'REJECT': '#ef4444' },
+      mf: [],
+      bookmobile: [],
+      buyback: [{ id: 'bb-default', name: 'ISBN scans, rank under 15M', enabled: true, salesRank_max: 15000000 }]
+    };
+  }
+  function defaultSorterFees(){
+    return {
+      costPerBook: 0.50,
+      pickAndPack: 1.00,
+      neatoscanPct: 2.12,
+      referralPct: 15,
+      closingFee: 1.80,
+      usedVsNewCapPct: 5,
+      shippingTiers: [
+        { maxLb: 1, amount: 3.95 }, { maxLb: 2, amount: 4.15 }, { maxLb: 3, amount: 4.51 },
+        { maxLb: 4, amount: 4.90 }, { maxLb: 5, amount: 5.27 }, { maxLb: 6, amount: 5.64 },
+        { maxLb: 7, amount: 6.03 }, { maxLb: 8, amount: 6.40 }, { maxLb: 9, amount: 6.79 },
+        { maxLb: 10, amount: 7.14 }, { maxLb: 11, amount: 7.56 }, { maxLb: 12, amount: 12.32 },
+        { maxLb: 999999, amount: 15.32 }
+      ]
+    };
+  }
+
+  // GET /sorter/rules — fetch admin's rules
+  if (pathname === '/sorter/rules' && req.method === 'GET') {
+    var srCode = (parsed.query.code || '').toUpperCase();
+    var srSess = getRequestSession(req, parsed);
+    if(!srSess || srSess.role !== 'admin' || srSess.subscriberCode !== srCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify(defaultSorterRules())); return; }
+      database.collection('sorter_rules').findOne({ code: srCode }).then(function(doc){
+        if(!doc){ res.writeHead(200); res.end(JSON.stringify(defaultSorterRules())); return; }
+        delete doc._id;
+        res.writeHead(200); res.end(JSON.stringify(doc));
+      }).catch(function(e){
+        res.writeHead(200); res.end(JSON.stringify(Object.assign({ error: e.message }, defaultSorterRules())));
+      });
+    });
+    return;
+  }
+
+  // PUT /sorter/rules — save admin's rules
+  if (pathname === '/sorter/rules' && req.method === 'PUT') {
+    parseBody(req, function(err, data){
+      var srCode = (data.code || '').toUpperCase();
+      var srSess = getRequestSession(req, parsed);
+      if(!srSess || srSess.role !== 'admin' || srSess.subscriberCode !== srCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var doc = {
+        code: srCode,
+        colors: data.colors || {},
+        mf: Array.isArray(data.mf) ? data.mf : [],
+        bookmobile: Array.isArray(data.bookmobile) ? data.bookmobile : [],
+        buyback: Array.isArray(data.buyback) ? data.buyback : [],
+        updatedAt: new Date()
+      };
+      connectMongo(function(err2, database){
+        if(err2 || !database){ res.writeHead(500); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('sorter_rules').updateOne({ code: srCode }, { $set: doc }, { upsert: true })
+          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); })
+          .catch(function(e){ res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // GET /sorter/fees
+  if (pathname === '/sorter/fees' && req.method === 'GET') {
+    var sfCode = (parsed.query.code || '').toUpperCase();
+    var sfSess = getRequestSession(req, parsed);
+    if(!sfSess || sfSess.role !== 'admin' || sfSess.subscriberCode !== sfCode){
+      res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+    }
+    connectMongo(function(err, database){
+      if(err || !database){ res.writeHead(200); res.end(JSON.stringify(defaultSorterFees())); return; }
+      database.collection('sorter_fees').findOne({ code: sfCode }).then(function(doc){
+        if(!doc){ res.writeHead(200); res.end(JSON.stringify(defaultSorterFees())); return; }
+        delete doc._id;
+        res.writeHead(200); res.end(JSON.stringify(doc));
+      }).catch(function(e){ res.writeHead(200); res.end(JSON.stringify(Object.assign({ error: e.message }, defaultSorterFees()))); });
+    });
+    return;
+  }
+
+  // PUT /sorter/fees
+  if (pathname === '/sorter/fees' && req.method === 'PUT') {
+    parseBody(req, function(err, data){
+      var sfCode = (data.code || '').toUpperCase();
+      var sfSess = getRequestSession(req, parsed);
+      if(!sfSess || sfSess.role !== 'admin' || sfSess.subscriberCode !== sfCode){
+        res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+      }
+      var doc = {
+        code: sfCode,
+        costPerBook: +data.costPerBook || 0,
+        pickAndPack: +data.pickAndPack || 0,
+        neatoscanPct: +data.neatoscanPct || 0,
+        referralPct: data.referralPct != null ? +data.referralPct : 15,
+        closingFee: +data.closingFee || 0,
+        usedVsNewCapPct: +data.usedVsNewCapPct || 0,
+        shippingTiers: Array.isArray(data.shippingTiers) ? data.shippingTiers.map(function(t){ return { maxLb: +t.maxLb || 0, amount: +t.amount || 0 }; }) : [],
+        updatedAt: new Date()
+      };
+      connectMongo(function(err2, database){
+        if(err2 || !database){ res.writeHead(500); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('sorter_fees').updateOne({ code: sfCode }, { $set: doc }, { upsert: true })
+          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); })
+          .catch(function(e){ res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // POST /sorter/login — employee PIN login (uses same employees collection as timeclock)
+  if (pathname === '/sorter/login' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var loginCode = (data.code || '').toUpperCase();
+      var pin = String(data.pin || '').trim();
+      if(!loginCode || !pin){ res.writeHead(400); res.end(JSON.stringify({ error: 'Code and PIN required' })); return; }
+      connectMongo(function(err2, database){
+        if(err2 || !database){ res.writeHead(500); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('employees').findOne({ code: loginCode, pin: pin, active: { $ne: false } }).then(function(emp){
+          if(!emp){ res.writeHead(401); res.end(JSON.stringify({ error: 'Invalid PIN' })); return; }
+          var token = crypto.randomBytes(20).toString('hex');
+          var sess = {
+            token: token, code: loginCode, employeeId: emp._id,
+            employeeName: emp.name || 'Employee',
+            station: data.station || '1',
+            startedAt: new Date(),
+            lastSeenAt: new Date()
+          };
+          database.collection('sorter_sessions').insertOne(sess).then(function(){
+            res.writeHead(200);
+            res.end(JSON.stringify({ ok: true, token: token, employee: { name: sess.employeeName, station: sess.station } }));
+          }).catch(function(e){ res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+        }).catch(function(e){ res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      });
+    });
+    return;
+  }
+
+  // POST /sorter/logout
+  if (pathname === '/sorter/logout' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var token = String(data.token || '').trim();
+      if(!token){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); return; }
+      connectMongo(function(err2, database){
+        if(!database){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); return; }
+        database.collection('sorter_sessions').deleteOne({ token: token })
+          .then(function(){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); })
+          .catch(function(){ res.writeHead(200); res.end(JSON.stringify({ ok: true })); });
+      });
+    });
+    return;
+  }
+
+  // GET /sorter/session — verify a token, return who it belongs to
+  if (pathname === '/sorter/session' && req.method === 'GET') {
+    var sToken = (parsed.query.token || '').trim();
+    if(!sToken){ res.writeHead(200); res.end(JSON.stringify({ valid: false })); return; }
+    connectMongo(function(err, database){
+      if(!database){ res.writeHead(200); res.end(JSON.stringify({ valid: false })); return; }
+      database.collection('sorter_sessions').findOne({ token: sToken }).then(function(s){
+        if(!s){ res.writeHead(200); res.end(JSON.stringify({ valid: false })); return; }
+        // Touch the session so we know it's still active
+        database.collection('sorter_sessions').updateOne({ token: sToken }, { $set: { lastSeenAt: new Date() } }).catch(function(){});
+        res.writeHead(200); res.end(JSON.stringify({ valid: true, code: s.code, employee: { name: s.employeeName, station: s.station } }));
+      }).catch(function(){ res.writeHead(200); res.end(JSON.stringify({ valid: false })); });
+    });
+    return;
+  }
+
+  // POST /sorter/sort — the main work: scan a barcode, look up book, run rules, return decision
+  // Body: { token, barcode, dryRun? }
+  if (pathname === '/sorter/sort' && req.method === 'POST') {
+    parseBody(req, function(err, data){
+      var sToken = String(data.token || '').trim();
+      var barcode = String(data.barcode || '').trim();
+      var dryRun = !!data.dryRun;
+      if(!barcode){ res.writeHead(400); res.end(JSON.stringify({ error: 'No barcode provided' })); return; }
+      connectMongo(function(err2, database){
+        if(!database){ res.writeHead(500); res.end(JSON.stringify({ error: 'DB unavailable' })); return; }
+        database.collection('sorter_sessions').findOne({ token: sToken }).then(function(sess){
+          var subscriberCode;
+          var employeeName = 'Tester'; var station = 'test';
+          if(dryRun){
+            // For dry run, allow either an admin session OR a sorter session
+            var adminSess = getRequestSession(req, parsed);
+            if(sess){ subscriberCode = sess.code; employeeName = sess.employeeName; station = sess.station; }
+            else if(adminSess && adminSess.role === 'admin'){ subscriberCode = adminSess.subscriberCode; }
+            else { res.writeHead(401); res.end(JSON.stringify({ error: 'Authentication required' })); return; }
+          } else {
+            if(!sess){ res.writeHead(401); res.end(JSON.stringify({ error: 'Not signed in. Please log in again.' })); return; }
+            subscriberCode = sess.code;
+            employeeName = sess.employeeName;
+            station = sess.station;
+          }
+
+          // Load rules + fees in parallel with the Amazon lookup for speed
+          var pending = 3;
+          var rulesDoc = null, feesDoc = null, book = null, bookErr = null;
+          function done(){
+            pending--;
+            if(pending > 0) return;
+            // All ready (or some failed) — run the rules
+            if(bookErr){
+              res.writeHead(200);
+              res.end(JSON.stringify({
+                ok: false, barcode: barcode,
+                error: bookErr,
+                destination: 'REJECT',
+                color: (rulesDoc && rulesDoc.colors && rulesDoc.colors['REJECT']) || '#ef4444',
+                reason: bookErr
+              }));
+              return;
+            }
+            var decision = runSorter(book, rulesDoc || defaultSorterRules(), feesDoc || defaultSorterFees());
+
+            // Log the scan (skip in dry-run)
+            if(!dryRun){
+              var scanDoc = {
+                code: subscriberCode,
+                ts: new Date(),
+                employeeName: employeeName,
+                station: station,
+                barcode: barcode,
+                isbn: book.isbn,
+                asin: book.asin,
+                title: book.title,
+                author: book.author,
+                format: book.format,
+                salesRank: book.salesRank,
+                weightLb: book.weightLb,
+                destination: decision.destination,
+                ruleId: decision.ruleId,
+                ruleName: decision.ruleName,
+                color: decision.color,
+                math: decision.math || null
+              };
+              database.collection('sorter_scans').insertOne(scanDoc).catch(function(){});
+            }
+
+            // Build response with breakdown of offers per bucket
+            var usedMfFbm = (book.used || []).filter(function(o){ return o.fulfillment === 'FBM'; }).sort(function(a,b){return a.price-b.price;});
+            var newMfFbm = (book.newOffers || []).filter(function(o){ return o.fulfillment === 'FBM'; }).sort(function(a,b){return a.price-b.price;});
+            var usedFba  = (book.used || []).filter(function(o){ return o.fulfillment === 'FBA'; }).sort(function(a,b){return a.price-b.price;});
+            var newFba   = (book.newOffers || []).filter(function(o){ return o.fulfillment === 'FBA'; }).sort(function(a,b){return a.price-b.price;});
+
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              ok: true, barcode: barcode,
+              book: { isbn: book.isbn, asin: book.asin, title: book.title, author: book.author, format: book.format, year: book.year, coverUrl: book.coverUrl, salesRank: book.salesRank, weightLb: book.weightLb },
+              decision: decision,
+              offers: { usedMf: usedMfFbm, newMf: newMfFbm, usedFba: usedFba, newFba: newFba }
+            }));
+          }
+          database.collection('sorter_rules').findOne({ code: subscriberCode }).then(function(d){ rulesDoc = d || defaultSorterRules(); done(); }).catch(function(){ rulesDoc = defaultSorterRules(); done(); });
+          database.collection('sorter_fees').findOne({ code: subscriberCode }).then(function(d){ feesDoc = d || defaultSorterFees(); done(); }).catch(function(){ feesDoc = defaultSorterFees(); done(); });
+          fetchBookForSorter(barcode, function(bErr, b){ if(bErr){ bookErr = bErr; } else { book = b; } done(); });
+        });
+      });
+    });
+    return;
+  }
+
+  // GET /sorter/scans — recent scan log (admin) or current session (employee)
+  if (pathname === '/sorter/scans' && req.method === 'GET') {
+    var ssToken = (parsed.query.token || '').trim();
+    var ssCode = (parsed.query.code || '').toUpperCase();
+    var ssLimit = Math.min(+parsed.query.limit || 50, 500);
+    connectMongo(function(err, database){
+      if(!database){ res.writeHead(200); res.end(JSON.stringify({ scans: [] })); return; }
+      function loadAndReturn(query){
+        database.collection('sorter_scans').find(query).sort({ ts: -1 }).limit(ssLimit).toArray()
+          .then(function(scans){ res.writeHead(200); res.end(JSON.stringify({ scans: scans })); })
+          .catch(function(e){ res.writeHead(200); res.end(JSON.stringify({ scans: [], error: e.message })); });
+      }
+      if(ssToken){
+        database.collection('sorter_sessions').findOne({ token: ssToken }).then(function(sess){
+          if(!sess){ res.writeHead(401); res.end(JSON.stringify({ error: 'Invalid session' })); return; }
+          // Employee sees only their session's scans
+          loadAndReturn({ code: sess.code, employeeName: sess.employeeName, ts: { $gte: sess.startedAt } });
+        });
+      } else if(ssCode){
+        var adminSess = getRequestSession(req, parsed);
+        if(!adminSess || adminSess.role !== 'admin' || adminSess.subscriberCode !== ssCode){
+          res.writeHead(403); res.end(JSON.stringify({ error: 'Admin access required.' })); return;
+        }
+        loadAndReturn({ code: ssCode });
+      } else {
+        res.writeHead(400); res.end(JSON.stringify({ error: 'token or code required' }));
+      }
+    });
     return;
   }
 
